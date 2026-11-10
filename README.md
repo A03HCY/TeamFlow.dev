@@ -1,1 +1,189 @@
 # TeamFlow.dev
+
+TeamFlow 是一个面向小团队的研发协作工作台：议题（Issue）、看板、里程碑、路线图、周计划、日程与团队设置。
+本仓库是 TeamFlow 的移植版：后端迁移到 `server/`，前端全部改用 gh-ui 组件库（`D:\Projects\GitHub UI\dist`
+中的单文件 `gh-ui.js` + `gh-ui.css`）重写，并**移除了网盘（Drive）与会议（Meeting）两个功能模块**。
+
+- 技术栈：Python 3.11+ / FastAPI / SQLAlchemy 2 / SQLite（默认，也可 PostgreSQL、MySQL）；前端为原生 ES Module + Web Components，无构建步骤。
+- 前端零运行时依赖：只使用 `static/vendor/gh-ui.js` 与 `static/vendor/gh-ui.css`。
+- 单页应用：由后端 `static` 目录托管，任意非 API 路径回退到 `index.html`。
+- 改型进行中：正在把工作台升级为「端侧探针 + 云端多智能体推理 + 人机确认 + 自动写回」的进度推断系统，
+  引擎为 [orchify](https://github.com/)（`orchify>=0.0.2`）。方案见 `docs/改型方案-多智能体进度推断.md`，
+  当前完成 **P0（服务端地基 + 端侧通信 SDK）** 与 **P1（WS 网关 + 配对 + 规则推断 + 洞察收件箱 + 引擎页面）**。
+
+## 目录结构
+
+```
+TeamFlow.dev/
+├─ server/                  # 服务端（FastAPI + 静态前端）
+│  ├─ main.py               # 启动器：参数解析、端口探测、uvicorn 启动
+│  ├─ requirements.txt      # Python 依赖
+│  ├─ .env.example          # 环境变量示例
+│  ├─ app/                  # 后端应用
+│  │  ├─ main.py            # FastAPI 应用、安全响应头、静态托管
+│  │  ├─ config.py          # 配置、数据库 URL 解析、引擎开关与预算常量
+│  │  ├─ deps.py            # 请求上下文、团队权限
+│  │  ├─ middleware.py      # 写保护 / gzip 压缩中间件
+│  │  ├─ security.py        # 口令哈希、Cookie、客户端 IP
+│  │  ├─ db/                # 模型、会话、建表与增量迁移、演示数据
+│  │  │  └─ engine_models.py # 推理引擎 9 张表（设备/仓库/代码事件/作业/洞察/审计…）
+│  │  ├─ routers/           # system / auth / settings / issues / milestones / labels /
+│  │  │                     # schedules / week / ai / teams / edge(引擎 REST + WS) / avatars
+│  │  └─ services/          # 业务逻辑（议题、里程碑、日程、周计划、概览、序列化…）
+│  │     ├─ engine/         # orchify 适配层：配置/LLM/Agent/结构化输出/hooks/落盘/预算/密钥
+│  │     ├─ inference/      # 推理业务：事件包校验、审计哈希链、规则推断(pipeline/rules)、作业 worker
+│  │     └─ edge/           # 端侧接入：设备配对(devices)、WS 网关(gateway)、事件入库(ingest)
+│  ├─ static/               # 前端（gh-ui 重构）
+│  │  ├─ index.html
+│  │  ├─ vendor/            # gh-ui.js / gh-ui.css（来自 GitHub UI/dist，原样拷贝）
+│  │  ├─ css/app.css        # 业务样式（在 gh-ui 设计令牌之上扩展）
+│  │  └─ js/                # api / store / ui / shell / router / app + pages/*（含 engine 页面）
+│  └─ tests/                # pytest（61 例：API 冒烟 + 引擎地基 + 端侧接入 P1）
+├─ client/                  # 端侧（P0 仅交付通信 SDK）
+│  └─ core/network.py       # EdgeClient：WS 长连接/重连/心跳/离线队列/反向查询
+├─ docs/                    # 改型方案
+└─ transfer/                # 交付说明
+```
+
+## 快速开始
+
+```powershell
+cd server
+python -m pip install -r requirements.txt
+python main.py                      # 默认 http://127.0.0.1:8000
+python main.py --host 0.0.0.0 --port 8080 --reload
+```
+
+首次启动会在 `server/data.db` 建表并写入演示数据（2 个团队、16 个议题等）。
+API 文档：<http://127.0.0.1:8000/api/docs>。
+
+演示账号（密码均为 `demo1234`）：`linwei`、`chenmo`、`suxiao`、`zhouyuan`。
+免登录模式下侧栏「操作身份」可切换匿名操作者；写入受「编辑口令」保护（未设置口令时可直接编辑）。
+
+## 配置
+
+全部通过环境变量或 `server/.env` 配置（`.env` 不会覆盖已存在的环境变量），详见 `server/.env.example`：
+
+| 变量 | 说明 | 默认 |
+| --- | --- | --- |
+| `TEAMFLOW_DB_URL` / `DATABASE_URL` / `TMT_DB` | 数据库 URL，支持 `sqlite:///路径`、`postgresql://`、`mysql://` | `sqlite:///server/data.db` |
+| `TEAMFLOW_SEED` | 是否写入演示数据 | `1` |
+| `TEAMFLOW_BACKUP` / `TEAMFLOW_BACKUP_DIR` | 写操作前是否备份 SQLite / 备份目录 | `1` / `server/backups` |
+| `TEAMFLOW_AVATAR_DIR` | 头像文件目录 | `server/data/avatars` |
+| `TEAMFLOW_COOKIE_SECURE` / `TEAMFLOW_HSTS` | 反向代理下的 Cookie / HSTS 策略 | 跟随协议 / `1` |
+| `TEAMFLOW_ENGINE` | 推理引擎总开关，`0` 时整块关闭（不建引擎目录、不加载 orchify） | `1` |
+| `TEAMFLOW_ENGINE_DIR` | 引擎运行数据目录（事件 JSONL / 检查点 / runs.db / 向量） | `server/data/engine` |
+| `TEAMFLOW_ENGINE_BASE_URL` / `_MODEL` / `_API_KEY` | 团队模型配置的运维兜底（优先级高于设置页） | 空 |
+| `TEAMFLOW_SECRET_KEY` | 加密团队密钥（Fernet）的主密钥；不配则降级明文并在设置页提示 | 空 |
+
+AI 助手（议题草稿、日程导入）的接口地址、模型与密钥保存在数据库 `settings` 表，
+在「设置 → AI 助手」中填写，不走环境变量；推理引擎则优先读 `team_engine` 表，
+没有时回落到同一组 `settings`（`ai_base_url` / `ai_model` / `ai_api_key`），
+运维可以用 `TEAMFLOW_ENGINE_*` 强制覆盖。
+
+## 功能
+
+- **概览**：统计卡、里程碑进度、最近动态、成员负载、近 14 天新建/完成趋势。
+- **议题**：筛选（状态机/优先级/负责人/里程碑/标签/搜索/排序）、新建与编辑、评论、关闭与重开、删除。
+- **看板**：待办 / 进行中 / 已完成三列，拖拽卡片即改状态。
+- **周计划**：按周查看成员计划、待排期议题一键排入本周、未完成议题顺延到下一周。
+- **里程碑**：计划型与持续型两种，进度按关联议题自动统计。
+- **路线图**：里程碑时间轴（含今天标线）与持续性里程碑。
+- **日程**：每周重复 / 单次日程的周历视图、参与人、颜色、iCalendar 订阅地址。
+- **设置**：团队资料与公开范围、成员与角色（owner/admin/member）、标签管理、编辑口令、登录开关、AI 配置、重置数据。
+
+## 推理引擎（改型 P0 + P1）
+
+目标是把「人手动改状态」升级为「保存代码 → 端侧脱敏上报 → 多智能体推断 → 人确认 → 写回」。
+P0 落**服务端地基**与**端侧通信 SDK**；P1 落**端侧接入链路**与**规则推断的洞察收件箱**，
+仍未接入 LLM 调用与任何自动写回。
+
+已交付：
+
+- **9 张表**（`app/db/engine_models.py`）：`devices` 配对设备、`repo_bindings` 仓库绑定、
+  `code_events` 脱敏代码事件（`event_uid` 幂等）、`inference_jobs` 推理作业、
+  `insights` 洞察（`draft/confirmed/rejected/expired`）、`insight_events` 洞察时间线、
+  `team_engine` 团队引擎配置、`integration_credentials` 外部集成凭据、`inference_audit` 审计。
+- **审计哈希链**（`app/services/inference/audit.py`）：每行 `prev_hash → hash` 按团队串链，
+  `verify()` 可定位第一处断点，用于追溯「谁在什么时候确认了哪条推断」。
+- **端侧事件包 schema v1**（`app/services/inference/events.py`）：Pydantic 校验体积、schema 版本、
+  `event_uid` 字符集、相对路径（挡住 `../`、盘符、绝对路径）、文件数上限，并在文件名/备注里
+  兜底扫描密钥样式（`sk-`、`AKIA`、私钥头等），命中即拒收。
+- **orchify 适配层**（`app/services/engine/`）：团队配置读写（`config`）、OpenAI 兼容后端与探活（`llm`）、
+  四个角色 Agent 与预算切分（`agents`/`budget`）、异步结构化输出与防幻觉闸门（`structured`）、
+  事件订阅与卸载（`hooks`）、事件/检查点/runs.db 落盘（`persist`）、密钥加密（`secrets`）。
+- **端侧 SDK**（`client/core/network.py`）：`EdgeClient` 负责 WS 长连接（指数退避重连）、心跳、
+  JSONL 离线队列（按 `event_uid` 去重、上限 500 条）、`ack` 处理、`pause/resume` 背压、
+  以及服务端反向查询（`on_query` 回传文件指纹）。依赖 `websockets`，仅在真正连接时导入。
+
+```python
+from client.core.network import EdgeClient, build_event, new_event_uid, sha256_file
+
+client = EdgeClient("ws://127.0.0.1:8000/api/edge/ws", token="配对码",
+                    device={"name": "linwei-mbp", "platform": "darwin"})
+client.on_query = lambda paths, reason: {
+    path: {"sha256": sha256_file(path)} for path in paths
+}
+client.enqueue(build_event(
+    event_uid=new_event_uid(),
+    repo={"label": "teamflow", "path_hash": "9f2c1a77b04e5d63", "branch": "feat/engine"},
+    files=[{"path": "server/app/main.py", "status": "modified", "added": 30, "removed": 5}],
+))
+await client.run_forever()
+```
+
+配套开关：`TEAMFLOW_ENGINE=0` 可整体关闭（启动日志只留一行，不建目录、不加载 orchify；
+测试覆盖此路径）。`ORCHIFY_APPROVAL_TIMEOUT` 等 orchify 进程级配置由
+`engine.configure_orchify_env()` 补默认值（orchify 自身默认是「永久等待审批」）。
+
+### P1：端侧接入与洞察收件箱
+
+- **配对与设备**（`app/services/edge/devices.py`、`app/routers/edge.py`）：
+  管理员在「引擎」页生成配对码（默认 60 分钟内首次接入有效），端侧把 token 放进 `hello` 帧；
+  支持多设备、吊销即时生效（在线连接被 4401 关闭）、暂停/恢复（服务端下发 `pause/resume`）。
+- **WS 网关**（`app/services/edge/gateway.py`）：`/api/edge/ws` 上跑 `hello / event / heartbeat /
+  query / query_result` 帧，事件按设备 60 秒滑动窗口限流，同设备新连接替换旧连接（4409），
+  并提供服务端反向查询（`registry.query()` → 端侧回传文件指纹）。
+- **入库**（`app/services/edge/ingest.py`）：事件再校验 → `event_uid` 幂等去重 → 落 `code_events`
+  → upsert 仓库绑定 → 按「设备+仓库+分支」合并 5 秒窗口内的作业（`inference_jobs`）。
+- **规则推断**（`app/services/inference/rules.py` + `pipeline.py`）：不调 LLM，用文件路径特征、
+  测试变更、是否 push、分支上的议题号打分，产出完成度/建议状态/证据引用；仍要过
+  `engine.check_analysis` 的防幻觉闸门，并按 `dedupe_key` 在 30 分钟内合并同一议题的重复洞察。
+- **作业 worker**（`app/services/inference/worker.py`）：队列轮询、同事务认领、失败退避重试，
+  产出新洞察后通过 WS 向在线设备广播 `insight` 帧；`TEAMFLOW_INFERENCE_WORKER=0` 可关闭，
+  改用 `POST /api/teams/{slug}/engine/jobs/drain` 手动驱动（测试走这条路）。
+- **审计**：配对、仓库绑定、洞察创建/驳回都写 `inference_audit` 哈希链，
+  `GET /api/teams/{slug}/engine/audit/verify` 可一键校验未被篡改。
+- **前端「引擎」页**（`static/js/pages/engine.js`）：在线设备/待确认洞察/排队作业/累计事件四项统计、
+  洞察卡片（证据 chip、置信度进度条、建议状态）、设备表（暂停·恢复·吊销）、审计链与最近事件，
+  以及配对码弹窗（含 `EdgeClient` 用法与一键复制）。
+
+P2 起才做：LLM Analyst（`OpenAICompat` + 结构化输出）、人工确认后写回议题状态/周计划/评论、
+服务端驱动端侧的定向取证，以及 GitHub / Jira 写回（P3）。
+
+## 与上游版本的差异
+
+- 删除「网盘」模块：`routers/drive.py`、`services/drive.py`、`services/cloud.py`、`services/unifile/`、`DriveItem` 模型、`Team.drive_public`、`DRIVE_*` 配置与相关前端页面。
+- 删除「会议」模块：`routers/meetings.py`、`services/meetings.py`、`MEETING_*` / ICE 配置与相关前端页面。
+- 头像存储从 unifile 抽象改为本地磁盘（`TEAMFLOW_AVATAR_DIR`），不再依赖远端存储。
+- 前端整体重写：使用 gh-ui 的 Web Components（`gh-app` / `gh-side` / `gh-box` / `gh-table` / `gh-dialog` 等），
+  由 `js/` 下的 ES Module 编排；不引入构建工具、不写内联脚本（CSP 仅允许同源脚本）。
+
+## 测试
+
+```powershell
+cd server
+python -m pytest tests -q
+```
+
+覆盖：
+- `tests/test_api.py`：健康检查与 bootstrap、团队详情、议题全生命周期与筛选、里程碑、标签、日程、周计划、
+  概览与路线图、已删除模块不再暴露路由、静态资源与 SPA 回退。
+- `tests/test_engine_foundation.py`：9 张表建表、审计链正常/篡改检测/团队隔离、事件包 9 类非法输入、
+  密钥泄漏拒收、超大包拒收、配置读写与环境变量优先级、Agent 预算与 JSON 开关、`FakeLLM` 走
+  `aask_structured`、防幻觉闸门、hooks 注册/卸载、`TEAMFLOW_ENGINE=0` 零副作用、
+  SDK 队列去重与上限、握手发送 ack、反向查询回包。
+- `tests/test_edge_p1.py`：配对与吊销、未知配对码拒连、WS 上报幂等（`stored → duplicate`）、
+  非法事件包 `ack rejected`、规则推断产出洞察并合并重复洞察、未 push / 无测试降级、
+  纯文档改动被闸门跳过、驳回与二次驳回 409、审计链校验（配对→绑定→创建→驳回）、REST 兜底上报、
+  `TEAMFLOW_ENGINE=0` 时配对返回 503，以及路径分类/周次换算/配对码不落明文等纯函数用例。

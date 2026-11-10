@@ -218,3 +218,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# TeamFlow runtime data
+server/data/
+server/backups/
+*.db
+*.db-shm
+*.db-wal
+shots/
+scripts/

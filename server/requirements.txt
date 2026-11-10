@@ -1,0 +1,25 @@
+fastapi>=0.110
+uvicorn[standard]>=0.27
+SQLAlchemy>=2.0
+python-multipart>=0.0.9
+
+# 推理引擎（多智能体进度推断）。不装也能跑：TEAMFLOW_ENGINE=0 时该功能整块关闭。
+orchify>=0.0.2
+httpx>=0.24
+
+# 引擎密钥加密（Fernet）。没装时降级为明文存储，设置页会提示。
+cryptography>=41
+
+# 可选：连接其他数据库时按需安装
+# pip install "psycopg[binary]"   # PostgreSQL（推荐）
+# pip install psycopg2-binary     # PostgreSQL（备选）
+# pip install pymysql             # MySQL / MariaDB
+
+# 可选：跑测试
+# pip install pytest
+
+# 可选：端侧 SDK 真正发事件时需要（服务端已由 uvicorn[standard] 带）
+# pip install websockets
+
+# 可选：数据库迁移（改表结构时用）
+# pip install alembic
