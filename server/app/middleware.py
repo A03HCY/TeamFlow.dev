@@ -22,13 +22,24 @@ from .services.settings import require_login_on
 
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
 EXEMPT_PATHS = {"/api/edit/unlock"}
+# 只读的 AI 端点：不改数据库，允许未解锁的访客使用（真正的写操作仍被口令拦住）。
+EXEMPT_SUFFIXES = ("/ai/chat",)
+EXEMPT_PREFIXES = ("/api/ai/project/draft",)
+
+
+def _exempt(path: str) -> bool:
+    if path in EXEMPT_PATHS:
+        return True
+    if path.startswith(EXEMPT_PREFIXES):
+        return True
+    return path.endswith(EXEMPT_SUFFIXES)
 
 
 class WriteGuardMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if request.method in SAFE_METHODS or not request.url.path.startswith("/api"):
             return await call_next(request)
-        if request.url.path in EXEMPT_PATHS:
+        if _exempt(request.url.path):
             return await call_next(request)
 
         try:

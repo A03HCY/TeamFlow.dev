@@ -49,6 +49,14 @@ ACK_STORED = "stored"
 ACK_DUPLICATE = "duplicate"
 ACK_REJECTED = "rejected"
 
+# ---- 反向查询（服务端点名要哪些文件，端侧在沙箱里回答）
+QUERY_MODE_STAT = "stat"
+QUERY_MODE_READ = "read"
+QUERY_MODES = (QUERY_MODE_STAT, QUERY_MODE_READ)
+MAX_QUERY_FILES = 20
+MAX_QUERY_BYTES = 256 * 1024
+DEFAULT_QUERY_BYTES = 64 * 1024
+
 # 关闭码：和协议错误区分开，端侧可据此决定「重试」还是「重新配对」
 CLOSE_FORBIDDEN = 4401
 CLOSE_REPLACED = 4409
@@ -209,15 +217,26 @@ class ConnectionRegistry:
     async def query(
         self,
         device_id: int,
-        paths: list[str],
+        files: list[str],
         *,
+        mode: str = QUERY_MODE_STAT,
+        max_bytes: int = DEFAULT_QUERY_BYTES,
         reason: str = "",
         timeout: float = ENGINE_QUERY_TIMEOUT,
     ) -> dict | None:
-        """让端侧回报指定文件的元信息（大小/摘要），超时返回 None。"""
+        """点名让端侧回报指定文件的元信息（``read`` 模式才附带内容），超时返回 None。
+
+        帧里同时带 ``files`` 与 ``paths``：新 SDK 读 ``files``，老 SDK 读 ``paths``，
+        两种客户端都能收到同一次查询。
+        """
         connection = self._by_device.get(device_id)
         if connection is None or connection.paused:
             return None
+        wanted = [str(item) for item in files if str(item or "").strip()][:MAX_QUERY_FILES]
+        if not wanted:
+            return None
+        normalized_mode = mode if mode in QUERY_MODES else QUERY_MODE_STAT
+        trimmed_bytes = max(1024, min(MAX_QUERY_BYTES, int(max_bytes or DEFAULT_QUERY_BYTES)))
         request_id = f"q{connection.device_id}-{int(time.time() * 1000)}-{len(connection.pending)}"
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         connection.pending[request_id] = future
@@ -225,7 +244,10 @@ class ConnectionRegistry:
         frame = {
             "type": FRAME_QUERY,
             "request_id": request_id,
-            "paths": list(paths)[:50],
+            "files": wanted,
+            "paths": list(wanted),
+            "mode": normalized_mode,
+            "max_bytes": trimmed_bytes,
             "reason": reason[:200],
         }
         try:
@@ -293,6 +315,7 @@ __all__ = [
     "CLOSE_REPLACED",
     "Connection",
     "ConnectionRegistry",
+    "DEFAULT_QUERY_BYTES",
     "FRAME_ACK",
     "FRAME_ERROR",
     "FRAME_EVENT",
@@ -304,6 +327,11 @@ __all__ = [
     "FRAME_QUERY",
     "FRAME_QUERY_RESULT",
     "FRAME_RESUME",
+    "MAX_QUERY_BYTES",
+    "MAX_QUERY_FILES",
+    "QUERY_MODES",
+    "QUERY_MODE_READ",
+    "QUERY_MODE_STAT",
     "ack_frame",
     "error_frame",
     "hello_ok_frame",

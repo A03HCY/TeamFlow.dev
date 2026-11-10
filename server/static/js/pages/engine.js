@@ -100,12 +100,18 @@ function deviceRow(device, canManage, paused = false) {
            <gh-icon name="stop" size="12"></gh-icon> 暂停
          </gh-btn>`
     : '';
+  const queryBtn = canManage && device.online
+    ? `<gh-btn size="sm" variant="invisible" data-act="query" data-id="${esc(device.id)}"
+         title="点名让端侧回报指定文件">
+         <gh-icon name="search" size="12"></gh-icon> 查文件
+       </gh-btn>`
+    : '';
   const actions = canManage && device.state !== 'revoked'
-    ? `${pauseBtn}
+    ? `${queryBtn}${pauseBtn}
        <gh-btn size="sm" variant="invisible" data-act="revoke" data-id="${esc(device.id)}">
          <gh-icon name="x" size="12"></gh-icon> 吊销
        </gh-btn>`
-    : '';
+    : queryBtn;
   return `<tr>
     <td>
       <div class="row" style="gap:8px">
@@ -322,6 +328,95 @@ export function openApplyDialog(slug, result, onDone = null) {
   });
 }
 
+export function openQueryDialog(slug, device, onDone = null) {
+  return openDialog({
+    title: `反向查询 · ${device.name || '设备'}`,
+    width: 'wide',
+    body: `<div class="dlg-note">端侧只会在自己的仓库根目录里回答。一行一个相对路径（最多 20 个）；
+      「元信息」模式只回大小/摘要/行数，「读取内容」模式会带回脱敏后的文本，单文件最多 8 KB。</div>
+      <gh-field label="文件（一行一个）" hint="例如：client/core/query.py">
+        <gh-textarea name="files" rows="5" placeholder="server/app/main.py&#10;client/core/network.py"></gh-textarea>
+      </gh-field>
+      <div class="form-grid">
+        ${fieldHTML({
+          label: '查询模式',
+          name: 'mode',
+          type: 'select',
+          value: 'stat',
+          options: [
+            { value: 'stat', label: '元信息（大小 / 摘要 / 行数）' },
+            { value: 'read', label: '读取内容（已脱敏）' },
+          ],
+        })}
+        ${fieldHTML({ label: '单文件上限（字节）', name: 'max_bytes', value: '8192' })}
+      </div>`,
+    okText: '开始查询',
+    cancelText: '取消',
+    onSubmit: async (values) => {
+      const files = String(values.files || '')
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      if (!files.length) {
+        toast('请至少填一个文件路径', 'err');
+        return false;
+      }
+      try {
+        const result = await api.post(
+          `/api/teams/${encodeURIComponent(slug)}/engine/edge/devices/${encodeURIComponent(device.id)}/query`,
+          {
+            files,
+            mode: String(values.mode || 'stat'),
+            max_bytes: Number(values.max_bytes || 8192) || 8192,
+            reason: '引擎页手动查询',
+          },
+        );
+        if (typeof onDone === 'function') await onDone();
+        showQueryResult(result);
+        return true;
+      } catch (error) {
+        toast(error.message || '查询失败', 'err');
+        return false;
+      }
+    },
+  });
+}
+
+export function showQueryResult(result) {
+  const files = result.files || {};
+  const names = Object.keys(files);
+  const rows = names.length
+    ? names.map((name) => {
+      const info = files[name] || {};
+      const meta = info.ok === false
+        ? `<gh-badge state="danger">失败</gh-badge> <span class="small muted">${esc(info.error || '')}</span>`
+        : `<span class="small muted">${esc(String(info.size ?? '—'))} 字节 · ${info.lines == null ? '行数未知' : `${esc(info.lines)} 行`} · ${esc(info.lang || '')}${info.truncated ? ' · 已截断' : ''}${info.redactions && Object.keys(info.redactions).length ? ' · 已脱敏' : ''}</span>`;
+      const content = info.content
+        ? `<pre class="query-result__code">${esc(String(info.content).slice(0, 4000))}</pre>`
+        : '';
+      return `<div class="query-result">
+        <div class="row" style="gap:8px;align-items:baseline">
+          <gh-icon name="file" size="14"></gh-icon>
+          <b class="mono small grow">${esc(name)}</b>
+          <span class="mono small muted" title="${esc(info.sha256 || '')}">${esc(String(info.sha256 || '').slice(0, 12))}</span>
+        </div>
+        <div>${meta}</div>
+        ${content}
+      </div>`;
+    }).join('')
+    : '<div class="small muted">端侧没有回答任何文件。</div>';
+  const error = result.error
+    ? `<gh-alert type="warning" dismissible>${esc(result.error)}</gh-alert>`
+    : '';
+  return openDialog({
+    title: `查询结果（${names.length} 个文件）`,
+    width: 'wide',
+    body: `${error}<div class="dlg-note">设备：${esc(result.device_name || result.device_id || '')} · 模式：${esc(result.mode || 'stat')}</div>${rows}`,
+    okText: null,
+    cancelText: null,
+  });
+}
+
 export async function render(view, route) {
   const slug = S.detail.slug;
   let overview;
@@ -461,6 +556,16 @@ export async function render(view, route) {
         await api.post(`/api/teams/${encodeURIComponent(slug)}/engine/edge/devices/${id}/pause`, { paused });
         toast(paused ? '已暂停该设备的上报' : '已恢复该设备的上报');
         render(view, route);
+        return;
+      }
+      if (name === 'query') {
+        const id = act.getAttribute('data-id');
+        const device = (overview.devices || []).find((item) => String(item.id) === String(id));
+        if (!device) {
+          toast('设备不存在或已下线', 'err');
+          return;
+        }
+        openQueryDialog(slug, device, () => render(view, route));
         return;
       }
       if (name === 'revoke') {

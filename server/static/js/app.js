@@ -8,8 +8,10 @@ import {
 import { setHandler, start, navigate } from './router.js';
 import { renderShell, refreshShell, VIEW_TITLES } from './shell.js';
 import { esc, SPINNER, emptyHTML, toast, askText, openDialog, hydrateFormValues } from './ui.js';
+import { mountAiDock, setDockContext } from './ai-dock.js';
 
 import * as auth from './pages/auth.js';
+import * as ai from './pages/ai.js';
 import * as overview from './pages/overview.js';
 import * as issues from './pages/issues.js';
 import * as issue from './pages/issue.js';
@@ -20,8 +22,11 @@ import * as roadmap from './pages/roadmap.js';
 import * as schedule from './pages/schedule.js';
 import * as engine from './pages/engine.js';
 import * as settings from './pages/settings.js';
+import * as projectNew from './pages/project-new.js';
 
-const PAGES = { overview, issues, issue, board, week, milestones, roadmap, schedule, engine, settings };
+const PAGES = {
+  ai, overview, issues, issue, board, week, milestones, roadmap, schedule, engine, settings,
+};
 
 function fatalHTML(message, hint = '') {
   return `<div class="center-wrap"><div class="auth-card">
@@ -49,6 +54,7 @@ async function onRoute(route) {
   window.__tfRoute = route;
   const app = document.getElementById('app');
   if (!app) return;
+  setDockContext(route);
 
   try {
     if (!S.boot) await bootstrap();
@@ -59,6 +65,7 @@ async function onRoute(route) {
   }
 
   if (route.kind === 'login') { auth.renderLogin(app); return; }
+  if (route.kind === 'teams-new') { projectNew.render(app, route); return; }
   if (route.kind === 'teams') { auth.renderTeams(app); return; }
 
   if (route.kind === 'home') {
@@ -186,6 +193,7 @@ fieldObserver.observe(document.body, { childList: true, subtree: true });
 async function boot() {
   applyTheme(storedTheme());
   hydrateFormValues(document.body);
+  mountAiDock();
   setHandler(onRoute);
   try {
     await start();

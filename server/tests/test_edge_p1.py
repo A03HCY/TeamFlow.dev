@@ -294,7 +294,87 @@ def test_engine_disabled_returns_503(client, team_slug, monkeypatch):
     assert response.json()["code"] == "engine_unavailable"
 
 
-# ------------------------------------------------------------------ 纯函数
+# ------------------------------------------------------------------ 反向查询：指定文件
+
+
+def test_query_offline_device_returns_409(client, team_slug):
+    pair = client.post(f"/api/teams/{team_slug}/engine/edge/pair", json={"name": "q-mac"})
+    device_id = pair.json()["device"]["id"]
+    response = client.post(
+        f"/api/teams/{team_slug}/engine/edge/devices/{device_id}/query",
+        json={"files": ["src/app.py"], "mode": "stat"},
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "device_offline"
+
+
+def test_query_validates_request(client, team_slug):
+    pair = client.post(f"/api/teams/{team_slug}/engine/edge/pair", json={"name": "q-mac2"})
+    device_id = pair.json()["device"]["id"]
+    empty = client.post(
+        f"/api/teams/{team_slug}/engine/edge/devices/{device_id}/query", json={"files": []})
+    assert empty.status_code == 400 and empty.json()["code"] == "bad_query"
+
+    bad_mode = client.post(
+        f"/api/teams/{team_slug}/engine/edge/devices/{device_id}/query",
+        json={"files": ["a.py"], "mode": "dump"},
+    )
+    assert bad_mode.status_code == 400 and bad_mode.json()["code"] == "bad_query"
+
+    too_many = client.post(
+        f"/api/teams/{team_slug}/engine/edge/devices/{device_id}/query",
+        json={"files": [f"src/f{i}.py" for i in range(30)]},
+    )
+    assert too_many.status_code == 400
+
+    unknown = client.post(
+        f"/api/teams/{team_slug}/engine/edge/devices/9999/query",
+        json={"files": ["a.py"]},
+    )
+    assert unknown.status_code == 404
+
+
+def test_registry_query_frame_carries_files_and_mode():
+    """网关侧：query 帧必须点名 files/mode/max_bytes，并把回包交回 future。"""
+    import asyncio
+    from app.services.edge.gateway import QUERY_MODE_READ, Connection, ConnectionRegistry
+
+    class _FakeWS:
+        def __init__(self):
+            self.sent: list[dict] = []
+
+        async def send_json(self, payload):
+            self.sent.append(payload)
+
+        async def close(self, code=1000, reason=""):
+            return None
+
+    async def scenario():
+        registry = ConnectionRegistry()
+        ws = _FakeWS()
+        connection = Connection(device_id=42, team_id=1, websocket=ws)
+        await registry.register(connection)
+        task = asyncio.create_task(registry.query(
+            42, ["src/a.py", "src/b.py"], mode=QUERY_MODE_READ, max_bytes=2048, reason="核对"))
+        for _ in range(50):
+            if ws.sent:
+                break
+            await asyncio.sleep(0.01)
+        frame = ws.sent[0]
+        assert frame["type"] == "query"
+        assert frame["files"] == ["src/a.py", "src/b.py"]
+        assert frame["paths"] == ["src/a.py", "src/b.py"]
+        assert frame["mode"] == "read"
+        assert frame["max_bytes"] == 2048
+        registry.resolve_query(connection, frame["request_id"],
+                               {"files": {"src/a.py": {"ok": True, "size": 10}}})
+        result = await asyncio.wait_for(task, timeout=2)
+        assert result["files"]["src/a.py"]["size"] == 10
+        registry.unregister(connection)
+
+    asyncio.run(scenario())
+
+
 
 def test_branch_issue_number_variants():
     assert rules.branch_issue_number("feat/12-login") == 12

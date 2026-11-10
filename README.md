@@ -9,8 +9,9 @@ TeamFlow 是一个面向小团队的研发协作工作台：议题（Issue）、
 - 单页应用：由后端 `static` 目录托管，任意非 API 路径回退到 `index.html`。
 - 改型进行中：正在把工作台升级为「端侧探针 + 云端多智能体推理 + 人机确认 + 自动写回」的进度推断系统，
   引擎为 [orchify](https://github.com/)（`orchify>=0.0.2`）。方案见 `docs/改型方案-多智能体进度推断.md`，
-  当前完成 **P0（服务端地基 + 端侧通信 SDK）**、**P1（WS 网关 + 配对 + 规则推断 + 洞察收件箱 + 引擎页面）**
-  与 **P2.5（议题层级 + 规划提案 + 验收标准 + 技能建议）**。
+  当前完成 **P0（服务端地基 + 端侧通信 SDK）**、**P1（WS 网关 + 配对 + 规则推断 + 洞察收件箱 + 引擎页面）**、
+  **P2.5（议题层级 + 规划提案 + 验收标准 + 技能建议）**，以及**常驻 AI 助手对话框与「用 AI 新建项目组」**
+  （复用同一份 `ai_*` 模型配置）。
 
 ## 目录结构
 
@@ -31,6 +32,7 @@ TeamFlow.dev/
 │  │  ├─ routers/           # system / auth / settings / issues / milestones / labels /
 │  │  │                     # schedules / week / ai / teams / edge(引擎 REST + WS) / avatars
 │  │  └─ services/          # 业务逻辑（议题、里程碑、日程、周计划、概览、序列化…）
+│  │     ├─ assistant.py    # AI 助手：团队快照问答 + 项目草稿生成 + 一次性建项目组
 │  │     ├─ engine/         # orchify 适配层：配置/LLM/Agent/结构化输出/hooks/落盘/预算/密钥
 │  │     ├─ inference/      # 推理业务：事件包校验、审计哈希链、规则推断(rules/pipeline)、
 │  │     │                  # 作业 worker、规划提案(proposals)、提案执行器(apply)
@@ -40,9 +42,12 @@ TeamFlow.dev/
 │  │  ├─ index.html
 │  │  ├─ vendor/            # gh-ui.js / gh-ui.css（来自 GitHub UI/dist，原样拷贝）
 │  │  ├─ css/app.css        # 业务样式（在 gh-ui 设计令牌之上扩展）
-│  │  └─ js/                # api / store / ui / shell / router / app + pages/*（含 engine 页面）
-│  └─ tests/                # pytest（75 例：API 冒烟 + 引擎地基 + 端侧接入 P1 + 层级与提案 P2.5）
-├─ client/                  # 端侧（P0 仅交付通信 SDK）
+│  │  └─ js/                # api / store / ui / shell / router / app / ai-dock + pages/*（含 ai 与 engine 页面）
+│  └─ tests/                # pytest（139 例：API 冒烟 + 引擎地基 + 端侧接入 P1 + 层级与提案 P2.5 + AI 助手 + 端侧 SDK）
+├─ client/                  # 端侧 SDK（探针 watchdog/脱敏/Diff 不在本次范围）
+│  ├─ config.py             # EdgeConfig / edge.json / TEAMFLOW_EDGE_* 环境变量
+│  ├─ api.py                # REST 兜底上报 + /api/health 健康检查
+│  ├─ main.py               # 命令行：status / set / send / run / clear
 │  └─ core/network.py       # EdgeClient：WS 长连接/重连/心跳/离线队列/反向查询
 ├─ docs/                    # 改型方案
 └─ transfer/                # 交付说明
@@ -105,6 +110,9 @@ AI 助手的模型配置（`ai_base_url` / `ai_api_key` / `ai_model`）存在数
 - **日程**：团队周历（每周重复 / 单次）、参与人、ICS 订阅。
 - **设置**：团队资料与公开范围、成员与技能、标签、编辑权限、登录策略、AI 助手、危险操作。
 - **引擎**（改型新增）：设备配对、在线状态、洞察收件箱、规划提案、审计链校验。
+- **AI 助手**：三处入口共用一个模型配置——任意页面右下角常驻对话框（Ctrl/⌘+J 开关）、
+  团队级 **AI 工作台**（`/<team>/ai`：大输入框 + 问答/规划/复盘模式 + `@` 引用议题 + 最近会话）、
+  以及「用 AI 新建项目组」页面（`/teams/new`）把一句项目描述变成里程碑 + 议题草稿。
 
 ### 议题层级
 
@@ -139,18 +147,28 @@ P2.5 落**议题层级**、**规划提案**（拆分 / 任务树 / 验收标准 
 - **orchify 适配层**（`app/services/engine/`）：团队配置读写（`config`）、OpenAI 兼容后端与探活（`llm`）、
   四个角色 Agent 与预算切分（`agents`/`budget`）、异步结构化输出与防幻觉闸门（`structured`）、
   事件订阅与卸载（`hooks`）、事件/检查点/runs.db 落盘（`persist`）、密钥加密（`secrets`）。
-- **端侧 SDK**（`client/core/network.py`）：`EdgeClient` 负责 WS 长连接（指数退避重连）、心跳、
+- **端侧 SDK**（`client/`）：`EdgeClient` 负责 WS 长连接（指数退避重连）、心跳、
   JSONL 离线队列（按 `event_uid` 去重、上限 500 条、ack 超时重投最多 5 次）、`ack` 处理、
-  `pause/resume` 背压，以及服务端反向查询（`on_query` 回传文件指纹）。依赖 `websockets`，仅在真正连接时导入。
+  `pause/resume` 背压，以及服务端反向查询（`on_query_request` / `on_query`）。
+  组包侧带 `validate_event()` 本地自检（与服务端同一套 schema v1 规则，错误在端侧就拦下来），
+  `client/api.py` 提供 REST 兜底与 `/api/health` 探活，`client/main.py` 是可用的命令行入口。
+  依赖 `websockets`，仅在真正连接时导入。
+- **反向查询（点名文件）**（`client/core/query.py`）：服务端可以指定一批相对路径，
+  端侧在 `QuerySandbox` 里回答：路径必须在允许的根目录内（拒绝绝对路径、盘符、`..`、符号链接逃逸），
+  `mode="stat"` 只回大小 / sha256 / 行数 / 语言 / 修改时间；
+  `mode="read"` 才回文本，且必须由端侧显式开启（`allow_content=True` / CLI `--allow-content`），
+  单文件按 `max_bytes`（默认 8 KB，上限 256 KB）截断，二进制与未知后缀一律拒答，
+  内容里的 `sk-` / `AKIA` / 私钥头 / `password=` / 邮箱会先被替换成 `[REDACTED]` 并回报计数。
+  服务端入口是 `POST /api/teams/{slug}/engine/edge/devices/{id}/query`，引擎页设备行有「查文件」按钮。
 
 ```python
-from client.core.network import EdgeClient, build_event, new_event_uid, sha256_file
+from client.core.network import EdgeClient, build_event, new_event_uid
+from client.core.query import QuerySandbox
 
 client = EdgeClient("ws://127.0.0.1:8000/api/edge/ws", token="配对码",
                     device={"name": "linwei-mbp", "platform": "darwin"})
-client.on_query = lambda paths, reason: {
-    path: {"sha256": sha256_file(path)} for path in paths
-}
+# 反向查询：端点名要哪些文件，端侧在根目录内回答（默认不传内容）
+client.on_query_request = QuerySandbox(r"D:\Projects\TeamFlow.dev", allow_content=False)
 client.enqueue(build_event(
     event_uid=new_event_uid(),
     repo={"label": "teamflow", "path_hash": "9f2c1a77b04e5d63", "branch": "feat/engine"},
@@ -158,6 +176,40 @@ client.enqueue(build_event(
 ))
 await client.run_forever()
 ```
+
+命令行（`pip install websockets` 后可用）：
+
+```powershell
+# 1. 写入端侧配置（也可用 TEAMFLOW_EDGE_* 环境变量）
+python -m client.main set --url ws://127.0.0.1:8000/api/edge/ws `
+    --token tfd_xxx --team default --device-name linwei-mbp --platform darwin
+
+# 2. 看配置、离线队列与连通性
+python -m client.main status --check
+
+# 3. 手工上报一个事件（--file path[:added:removed]、--added-file、--deleted-file）
+python -m client.main send --branch feat/12-login --head abc1234def5678 `
+    --path-hash 9f2c1a77b04e5d63 `
+    --file server/app/routers/auth.py:40:5 --added-file server/tests/test_login.py
+
+# 4. 常驻：清空离线队列并保持长连接（--repo-root 打开反向查询，
+#    --allow-content 才允许回文本内容，默认只回大小/摘要）
+python -m client.main run --repo-root D:\Projects\TeamFlow.dev --allow-content
+
+# 5. 丢弃离线队列（会改名成 events.jsonl.bak）
+python -m client.main clear
+```
+
+SDK 行为要点：
+
+| 场景 | 行为 |
+| --- | --- |
+| 握手前连接被拒 | `hello_ok` 之外的 `error` 帧若 code ∈ `bad_device_token / device_revoked / pair_expired`，抛 `FatalClose(4401)` |
+| 服务端关闭 4401 / 4409 / 1008 | 记下 `client.fatal = {code, reason}` 并**停止重连**（吊销、别处重连、拒连都不该无限重试） |
+| 网络抖动、ack 超时 | 在途事件放回队首重投，`attempts` 超过 5 次计入 `dropped` 并回调 `on_reject` |
+| `pause` / `resume` | 服务端背压，暂停期间只发心跳，恢复后继续补传 |
+| 组包非法 | `build_event` / `validate_event` 抛 `EventInvalid`（带 `field`），CLI 退出码 2 |
+| WS 完全不通 | 用 `client/api.py` 的 `RestFallback` 走 `POST /api/teams/{slug}/engine/edge/events`（仍受编辑口令保护） |
 
 配套开关：`TEAMFLOW_ENGINE=0` 可整体关闭（启动日志只留一行，不建目录、不加载 orchify；
 测试覆盖此路径）。`ORCHIFY_APPROVAL_TIMEOUT` 等 orchify 进程级配置由
@@ -170,7 +222,9 @@ await client.run_forever()
   支持多设备、吊销即时生效（在线连接被 4401 关闭）、暂停/恢复（服务端下发 `pause/resume`）。
 - **WS 网关**（`app/services/edge/gateway.py`）：`/api/edge/ws` 上跑 `hello / event / heartbeat /
   query / query_result` 帧，事件按设备 60 秒滑动窗口限流，同设备新连接替换旧连接（4409），
-  并提供服务端反向查询（`registry.query()` → 端侧回传文件指纹）。
+  并提供服务端反向查询：`registry.query(device_id, files, mode=..., max_bytes=...)` 指定文件清单，
+  端侧按 `client/core/query.py` 的沙箱规则回答（`stat` 只给指纹，`read` 才给脱敏内容）。
+  REST 入口是 `POST /api/teams/{slug}/engine/edge/devices/{id}/query`，引擎页设备行的「查文件」按钮就是它。
 - **入库**（`app/services/edge/ingest.py`）：事件再校验 → `event_uid` 幂等去重 → 落 `code_events`
   → upsert 仓库绑定 → 按「设备+仓库+分支」合并 5 秒窗口内的作业（`inference_jobs`）。
 - **规则推断**（`app/services/inference/rules.py` + `pipeline.py`）：不调 LLM，用文件路径特征、
@@ -182,8 +236,9 @@ await client.run_forever()
 - **审计**：配对、仓库绑定、洞察创建/驳回都写 `inference_audit` 哈希链，
   `GET /api/teams/{slug}/engine/audit/verify` 可一键校验未被篡改。
 - **前端「引擎」页**（`static/js/pages/engine.js`）：在线设备/待确认洞察/排队作业/累计事件四项统计、
-  洞察卡片（证据 chip、置信度进度条、建议状态）、设备表（暂停·恢复·吊销）、审计链与最近事件，
-  以及配对码弹窗（含 `EdgeClient` 用法与一键复制）。
+  洞察卡片（证据 chip、置信度进度条、建议状态）、设备表（查文件·暂停·恢复·吊销）、审计链与最近事件，
+  以及配对码弹窗（含 `EdgeClient` 用法与一键复制）。「查文件」可以直接点名让在线设备回报
+  指定文件的大小/摘要/行数，勾「读取内容」才会带回脱敏后的文本，结果在弹窗里逐文件展示。
 
 ### P2.5：议题层级、规划提案与验收标准
 
@@ -209,6 +264,39 @@ await client.run_forever()
 
 P2 起才做：LLM Analyst（`OpenAICompat` + 结构化输出）、人工确认后写回议题状态/周计划/评论、
 服务端驱动端侧的定向取证，以及 GitHub / Jira 写回（P3）。
+
+## AI 助手（常驻对话框 + AI 工作台 + 用 AI 新建项目组）
+
+模型配置与「设置 → AI 助手」共用一份 `settings` 表里的 `ai_base_url` / `ai_api_key` / `ai_model`（OpenAI 兼容端点），
+没配置时接口返回 400 `ai_unconfigured`，界面上会提示去设置页填写。
+
+- **常驻对话框**（`static/js/ai-dock.js` + `POST /api/teams/{slug}/ai/chat`）：
+  - 挂在 `document.body` 上一次，路由切换不重建，因此对话不会因为换页丢失；
+    切团队时按 `localStorage` 里的 `tf:ai-chat:team:<slug>` 分别存取，最多保留 24 条。
+  - 每次提问都会带上**团队快照**（叶子口径统计、最近 6 个里程碑与验收标准摘要、最近 10 个未关闭议题、成员技能），
+    系统提示明确「只能基于快照回答、不得声称已改数据、涉及写操作让用户去界面确认」。
+  - 快捷提问：概括当前进度 / 建议里程碑 / 安排本周 / 起草新项目（最后一项直接跳到 `/teams/new`）。
+  - 限流 20 次 / 60 秒（`app/services/ratelimit.py`），超限返回 429 `rate_limited`；
+    提问会写一条 `activity`（`asked`），便于团队追溯。
+- **AI 工作台**（`static/js/pages/ai.js` + `/{team}/ai`）：把 Copilot 式首页搬进团队工作区。
+  - 输入卡支持 `@` 引用议题（最多 8 个，`#n 标题 + 正文摘要` 会拼进系统提示）、三种模式
+    （`ask` 问答 / `plan` 规划 / `review` 复盘，模式提示词影响回答侧重）、团队范围与当前模型 pill。
+  - 快捷动作：排查风险、规划本周、新建议题（直接开新建弹窗）、起草新项目、引擎洞察。
+  - **会话落库**（`ai_sessions` / `ai_messages` 两张表）：首条提问自动生成标题，最多保留最近 20 个会话；
+    `GET/POST /api/teams/{slug}/ai/sessions`、`GET/DELETE /api/teams/{slug}/ai/sessions/{id}`；
+    对话走 `POST /api/teams/{slug}/ai/chat {message, session_id, context, mode}`，服务端把
+    user/assistant 两条消息写库并回传 `session_id`。
+  - 悬浮对话框右上角「在 AI 工作台打开」跳到同一会话页；两处共享同一套团队快照与限流。
+- **用 AI 新建项目组**（`static/js/pages/project-new.js` + `/api/ai/project/*`）：
+  - `POST /api/ai/project/draft {goal, name?}` → 草稿（名称、地址、里程碑、议题），**只生成不落库**；
+    服务端会归一化：日期颠倒自动交换并告警、缺截止日期按两周一个里程碑补齐、验收标准统一成 `- [ ]` 清单、
+    工时夹在 1–80、非法优先级回落 `medium`、越界的里程碑序号归「未归属」。
+  - 页面里可以改名、调日期、改验收标准、增删里程碑与议题；`POST /api/ai/project/create {draft}`
+    在**单个事务**里建团队、里程碑、议题与缺省标签，并写一条团队级 `activity`。
+  - 创建需要登录模式（`require_login=1`）：关掉登录时全平台只允许一个团队，页面会禁用按钮并说明原因。
+  - 项目地址优先用 AI 建议的英文 slug；没有或非法时退化为 `proj-xxxx`，不会占掉 `/team` 这种泛化路径。
+- **写保护豁免**：`/api/teams/{team}/ai/chat` 与 `/api/ai/project/draft` 是只读语义，免登录模式下不会被
+  「编辑口令」中间件拦成 401；`/api/ai/project/create` 仍然是被保护的写操作。
 
 ## 与上游版本的差异
 
@@ -239,3 +327,14 @@ python -m pytest tests -q
 - `tests/test_edge_p2.py`：子议题只算叶子、子议题继承里程碑、自挂/反挂环检测、深度上限、
   父议题关闭与删除守卫、提升为顶层、成员技能往返、`split` 提案 apply（dry-run / 真实 / 二次 409 / revert）、
   重复提案合并、无证据提案降置信度、`criteria` 写入验收标准、负责人打分优先命中技能、非法 kind 400。
+- `tests/test_ai_assistant.py`：未配置时 400、配置后状态与模型、对话往返（系统提示含团队快照）、
+  空消息 400、草稿归一化（日期交换 / 验收标准统一 / 优先级回落 / 工时夹取 / 越界里程碑 / 空标题丢弃）、
+  goal 过短 400、免登录时创建 403、服务层一次性建团队+里程碑+议题+标签、团队快照含成员与叶子口径说明、
+  AI 工作台会话：context 归一化与落库、标题取首条、多轮历史、会话列表与详情、删除后 404、空消息 400、空会话。
+- `tests/test_edge_sdk.py`：端侧 SDK 的组包与自动统计、`validate_event` 拒绝非法输入（版本/uid/kind/时间/
+  路径绝对化/盘符/`../`/超长/超 400 文件）、离线队列去重与上限与重投、窗口流水线并发发送、
+  `ack` 的 stored/rejected 分支、`pause/resume` 背压、反向查询回包（旧式 `on_query` 与新式
+  `on_query_request` 两条路径）、4401/4409/`device_revoked` 的致命关闭（停止重连且 `fatal` 有值）、
+  配置读写与环境变量覆盖、`ensure_ready` 参数校验、REST 兜底（`ws://` 地址自动换 `http://`、
+  duplicate 不算错误、rejected 透传）、查询沙箱（点名文件、越界拒绝、`read` 需授权、二进制拒答、
+  文件数上限、密钥脱敏）与 CLI（`--version`、`set`/`status`、`send --offline`）。

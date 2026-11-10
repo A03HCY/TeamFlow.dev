@@ -14,7 +14,10 @@ export function parseLocation() {
   });
   if (!segments.length) return { kind: 'home', params, path };
   if (segments[0] === 'login') return { kind: 'login', params, path };
-  if (segments[0] === 'teams') return { kind: 'teams', params, path };
+  if (segments[0] === 'teams') {
+    if (segments[1] === 'new') return { kind: 'teams-new', params, path };
+    if (!segments[1]) return { kind: 'teams', params, path };
+  }
   if (segments[0] === 'api') return { kind: 'unknown', params, path };
   return {
     kind: 'team',

@@ -9,6 +9,7 @@ import {
 import { esc, avatarHTML, openDialog, toast, confirmAction } from './ui.js';
 
 export const NAV = [
+  { view: 'ai', icon: 'sparkle', label: 'AI 助手' },
   { view: 'overview', icon: 'home', label: '概览' },
   { view: 'issues', icon: 'issue-opened', label: '议题' },
   { view: 'board', icon: 'project', label: '看板' },
@@ -21,6 +22,7 @@ export const NAV = [
 ];
 
 export const VIEW_TITLES = {
+  ai: 'AI 助手',
   overview: '概览',
   issues: '议题',
   issue: '议题详情',

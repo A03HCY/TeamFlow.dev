@@ -292,8 +292,44 @@ class Activity(Base):
     created_at: Mapped[str] = mapped_column(String(32), nullable=False, default=utcnow_iso)
 
 
+class AiSession(Base):
+    """AI 工作台的一次对话（跨设备可恢复，标题取自首条提问）。"""
+
+    __tablename__ = "ai_sessions"
+    __table_args__ = (Index("idx_ai_sessions_team", "team_id", "id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    team_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    title: Mapped[str] = mapped_column(String(120), nullable=True, default="")
+    mode: Mapped[str] = mapped_column(String(20), nullable=True, default="ask")
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False, default=utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(String(32), nullable=False, default=utcnow_iso)
+
+
+class AiMessage(Base):
+    __tablename__ = "ai_messages"
+    __table_args__ = (Index("idx_ai_messages_session", "session_id", "id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("ai_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False, default="user")
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # 这条提问引用了哪些议题（编号数组的 JSON），便于回看「当时看了什么」
+    context: Mapped[str] = mapped_column(Text, nullable=True, default="[]")
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False, default=utcnow_iso)
+
+
 __all__ = [
     "Activity",
+    "AiMessage",
+    "AiSession",
     "Base",
     "Comment",
     "EditSession",

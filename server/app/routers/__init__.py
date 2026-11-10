@@ -26,6 +26,7 @@ routers = [
     schedules.router,
     week.router,
     ai.router,
+    ai.team_router,
     teams.router,
     edge.router,
     edge.ws_router,

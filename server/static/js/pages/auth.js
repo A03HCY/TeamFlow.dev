@@ -163,6 +163,7 @@ export async function renderTeams(app) {
           <p class="small muted">${teams.length ? `共 ${teams.length} 个团队，点击卡片进入工作区。` : '还没有可访问的团队。'}</p>
         </div>
         <div class="row">
+          ${S.user ? '<gh-btn size="sm" data-act="ai-project"><gh-icon name="sparkle"></gh-icon> 用 AI 新建项目组</gh-btn>' : ''}
           ${S.user ? '<gh-btn variant="primary" size="sm" data-act="create"><gh-icon name="plus"></gh-icon> 新建团队</gh-btn>' : '<a class="small" href="/login">登录后创建团队</a>'}
         </div>
       </div>
@@ -179,6 +180,7 @@ export async function renderTeams(app) {
     if (act.getAttribute('data-act') === 'create') {
       import('./team-create.js').then((mod) => mod.openCreateTeamPage(() => renderTeams(app)));
     }
+    if (act.getAttribute('data-act') === 'ai-project') { navigate('/teams/new'); }
   });
 }
 

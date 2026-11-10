@@ -46,6 +46,7 @@ ACTIONS = frozenset(
         "engine.disabled",
         "device.paired",
         "device.revoked",
+        "device.queried",
         "repo.bound",
     }
 )

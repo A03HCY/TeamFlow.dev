@@ -26,11 +26,15 @@ from ..services.edge import devices as device_service
 from ..services.edge.gateway import (
     CLOSE_ERROR,
     CLOSE_FORBIDDEN,
+    DEFAULT_QUERY_BYTES,
     FRAME_EVENT,
     FRAME_HEARTBEAT,
     FRAME_HELLO,
     FRAME_HELLO_OK,
     FRAME_QUERY_RESULT,
+    MAX_QUERY_BYTES,
+    MAX_QUERY_FILES,
+    QUERY_MODES,
     Connection,
     ack_frame,
     error_frame,
@@ -215,6 +219,90 @@ async def pause_device(
         payload = device_service.device_dict(device, online=int(device_id) in registry.online_ids())
     delivered = await registry.set_paused(int(device_id), paused, reason=str(body.get("reason") or ""))
     return {"ok": True, "paused": paused, "delivered": delivered, "device": payload}
+
+
+@router.post("/engine/edge/devices/{device_id}/query")
+async def query_device(
+    device_id: int,
+    access: TeamAccess = Depends(team_access),
+    ctx: Ctx = Depends(get_ctx),
+) -> dict:
+    """点名让端侧回报指定文件（``mode=stat`` 只给指纹，``read`` 才带内容）。
+
+    只对在线且未暂停的设备生效；端侧沙箱会二次校验路径，越界/非文本一律拒答。
+    """
+    _require_engine()
+    access.require_edit()
+    body = await read_body(ctx.request)
+    raw_files = body.get("files")
+    if raw_files is None:
+        raw_files = body.get("paths")
+    if isinstance(raw_files, str):
+        raw_files = [raw_files]
+    files: list[str] = []
+    for item in raw_files or []:
+        text = str(item or "").strip()
+        if text and text not in files:
+            files.append(text[:400])
+    if not files:
+        raise ApiError("请至少指定一个文件（files）", 400, code="bad_query")
+    if len(files) > MAX_QUERY_FILES:
+        raise ApiError(f"一次最多查询 {MAX_QUERY_FILES} 个文件", 400, code="bad_query")
+
+    mode = str(body.get("mode") or "stat")
+    if mode not in QUERY_MODES:
+        raise ApiError(f"查询模式只支持 {'/'.join(QUERY_MODES)}", 400, code="bad_query")
+    try:
+        max_bytes = int(body.get("max_bytes") or DEFAULT_QUERY_BYTES)
+    except (TypeError, ValueError) as exc:
+        raise ApiError("max_bytes 必须是整数", 400, code="bad_query") from exc
+    max_bytes = max(1024, min(MAX_QUERY_BYTES, max_bytes))
+    reason = str(body.get("reason") or "")[:200]
+
+    with session_scope() as session:
+        device = _device_or_404(session, access.id, device_id)
+        if device.revoked_at:
+            raise ApiError("该设备已被吊销", 409, code="device_revoked")
+        device_name = device.name
+
+    started = utcnow_iso()
+    result = await registry.query(
+        int(device_id), files, mode=mode, max_bytes=max_bytes, reason=reason)
+    if result is None:
+        raise ApiError(
+            "设备当前不在线或未在超时内响应，无法反向查询",
+            409,
+            code="device_offline",
+        )
+    payload = {
+        "ok": not result.get("error"),
+        "device_id": int(device_id),
+        "device_name": device_name,
+        "mode": mode,
+        "max_bytes": max_bytes,
+        "requested": files,
+        "files": result.get("files") or {},
+        "error": str(result.get("error") or ""),
+        "started_at": started,
+        "finished_at": utcnow_iso(),
+    }
+    with session_scope() as session:
+        device = _device_or_404(session, access.id, device_id)
+        audit.append(
+            session,
+            team_id=access.id,
+            action="device.queried",
+            subject_type="device",
+            subject_id=device.id,
+            payload={
+                "mode": mode,
+                "files": files[:MAX_QUERY_FILES],
+                "answered": sorted(payload["files"]),
+                "error": payload["error"][:200],
+            },
+            actor=ctx.actor(),
+        )
+    return payload
 
 
 @router.get("/engine/edge/events")
