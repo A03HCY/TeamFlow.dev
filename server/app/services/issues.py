@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from ..config import VALID_PRIORITY, VALID_STATUS
 from ..db.base import today_iso, utcnow_iso
 from ..db.models import Issue, Label, Milestone, Team
-from . import weekplan
+from . import hierarchy, weekplan
 from .serializers import issue_dict
 
 #: 列表排序：updated（最近更新，默认）| created | number | priority | due | week
@@ -37,6 +37,16 @@ SORTS = {
 def _int_or_none(value) -> int | None:
     text = str(value).strip() if value is not None else ""
     return int(text) if text.isdigit() else None
+
+
+def _float_or_none(value) -> float | None:
+    if value in (None, "", "null"):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(number, 2) if number >= 0 else None
 
 
 def find_by_number(session: Session, team_id: int, number: int) -> Issue | None:
@@ -89,6 +99,10 @@ def build_query(session: Session, team_id: int, filters: dict) -> Select:
             if parsed_week:
                 stmt = stmt.where(Issue.plan_week == parsed_week)
 
+    # 层级过滤：parent=12 只看子议题；parent=none 只看顶层
+    if filters.get("parent") is not None:
+        stmt = hierarchy.tree_query(session, team_id, filters)
+
     order = SORTS.get((filters.get("sort") or "updated").lower(), SORTS["updated"])
     return stmt.order_by(*order)
 
@@ -98,15 +112,22 @@ def list_issues(session: Session, team_id: int, filters: dict) -> list[Issue]:
 
 
 def counts(session: Session, team_id: int) -> dict:
+    """统计口径：**只算叶子**，父议题另给 ``parents``（避免父子双计）。"""
+    leaf = hierarchy.leaf_condition()
     total = session.scalar(
-        select(func.count()).select_from(Issue).where(Issue.team_id == team_id)
+        select(func.count()).select_from(Issue).where(Issue.team_id == team_id, leaf)
     ) or 0
     closed = session.scalar(
         select(func.count()).select_from(Issue).where(
-            Issue.team_id == team_id, Issue.state == "closed"
+            Issue.team_id == team_id, Issue.state == "closed", leaf
         )
     ) or 0
-    return {"total": total, "open": total - closed, "closed": closed}
+    parents = session.scalar(
+        select(func.count()).select_from(Issue).where(
+            Issue.team_id == team_id, ~leaf
+        )
+    ) or 0
+    return {"total": total, "open": total - closed, "closed": closed, "parents": parents}
 
 
 def parse_label_ids(values) -> list[int]:
@@ -151,6 +172,13 @@ def create_issue(session: Session, team: Team, data: dict, number: int) -> Issue
     priority = data.get("priority") if data.get("priority") in VALID_PRIORITY else "medium"
     state = "closed" if status == "done" else "open"
     now = utcnow_iso()
+    parent_id = hierarchy.resolve_parent(
+        session, team.id, None, data.get("parent_id", data.get("parent"))
+    )
+    milestone_id = data.get("milestone_id")
+    if parent_id and milestone_id in (None, ""):
+        parent = session.get(Issue, parent_id)
+        milestone_id = parent.milestone_id if parent is not None else None
     issue = Issue(
         team_id=team.id,
         number=number,
@@ -159,11 +187,14 @@ def create_issue(session: Session, team: Team, data: dict, number: int) -> Issue
         state=state,
         status=status,
         priority=priority,
-        milestone_id=data.get("milestone_id"),
+        milestone_id=milestone_id,
         assignee_id=_int_or_none(data.get("assignee_id")),
         author_id=_int_or_none(data.get("author_id")),
         due_date=data.get("due_date"),
         plan_week=weekplan.parse_week(data.get("plan_week")),
+        parent_id=parent_id,
+        sort_order=_int_or_none(data.get("sort_order")) or 0,
+        estimate_hours=_float_or_none(data.get("estimate_hours")),
         created_at=now,
         updated_at=now,
         closed_at=now if state == "closed" else None,
@@ -212,8 +243,8 @@ def update_issue(session: Session, issue: Issue, data: dict) -> tuple[Issue, str
     if "status" in data and data.get("status") in VALID_STATUS:
         status = data["status"]
         previous = issue.status
-        issue.status = status
         if status == "done":
+            hierarchy.guard_parent_close(session, issue)
             issue.state = "closed"
             issue.closed_at = now
             if previous != "done":
@@ -223,13 +254,31 @@ def update_issue(session: Session, issue: Issue, data: dict) -> tuple[Issue, str
             issue.closed_at = None
             if previous == "done":
                 notes.append("重新打开")
+        issue.status = status
         touched = True
     elif data.get("state") in ("open", "closed"):
         state = data["state"]
+        if state == "closed":
+            hierarchy.guard_parent_close(session, issue)
         issue.state = state
         issue.status = "done" if state == "closed" else "todo"
         issue.closed_at = now if state == "closed" else None
         notes.append("关闭了" if state == "closed" else "重新打开")
+        touched = True
+
+    if "parent_id" in data or "parent" in data:
+        issue.parent_id = hierarchy.resolve_parent(
+            session,
+            issue.team_id,
+            issue,
+            data.get("parent_id") if "parent_id" in data else data.get("parent"),
+        )
+        touched = True
+    if "sort_order" in data:
+        issue.sort_order = _int_or_none(data.get("sort_order")) or 0
+        touched = True
+    if "estimate_hours" in data:
+        issue.estimate_hours = _float_or_none(data.get("estimate_hours"))
         touched = True
 
     if "label_ids" in data:

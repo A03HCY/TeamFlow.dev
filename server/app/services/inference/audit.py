@@ -34,7 +34,9 @@ _CHAIN_LOCK = threading.Lock()
 ACTIONS = frozenset(
     {
         "insight.created",
+        "insight.previewed",
         "insight.confirmed",
+        "insight.applied",
         "insight.rejected",
         "insight.reverted",
         "insight.expired",

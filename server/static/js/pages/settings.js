@@ -21,12 +21,21 @@ function publicSwitch(name, label, checked, hint) {
   </gh-field>`;
 }
 
+function skillChips(member) {
+  const skills = Array.isArray(member.skills) ? member.skills : [];
+  if (!skills.length) return '';
+  return `<div class="row" style="gap:4px;margin-top:4px">${skills
+    .map((item) => `<gh-label color="${item.level >= 3 ? '#0969da' : (item.level === 2 ? '#8250df' : '#6b7280')}">${esc(item.name)}</gh-label>`)
+    .join('')}</div>`;
+}
+
 function memberRow(member, canEdit, isOwner) {
   return `<div class="row" style="padding:10px 0;border-bottom:1px solid var(--gh-border-muted)">
     ${avatarHTML(member, 32)}
     <div class="grow">
       <div><b>${esc(member.display_name || member.username)}</b> <span class="small muted mono">@${esc(member.username)}</span></div>
       <div class="small muted">${esc(member.title || '—')}${member.can_login ? '' : ' · 仅记录身份'}</div>
+      ${skillChips(member)}
     </div>
     <gh-badge state="${member.role === 'owner' ? 'accent' : (member.role === 'admin' ? 'warn' : 'open')}">${esc(ROLE_LABELS[member.role] || member.role || '成员')}</gh-badge>
     ${canEdit && member.role !== 'owner' ? `
@@ -76,6 +85,8 @@ export function openLabelDialog(label = null, onSaved = null) {
 export function openMemberDialog(member = null, onSaved = null) {
   const slug = S.detail.slug;
   const current = member || {};
+  const skills = Array.isArray(current.skills) ? current.skills : [];
+  const skillText = skills.map((item) => `${item.name}${item.level >= 3 ? '!' : (item.level === 2 ? '+' : '')}`).join(', ');
   const body = `
     <div class="form-grid">
       ${fieldHTML({ label: '显示名称', name: 'display_name', placeholder: '张三' })}
@@ -86,7 +97,8 @@ export function openMemberDialog(member = null, onSaved = null) {
         <option value="admin"${current.role === 'admin' ? ' selected' : ''}>管理员</option>
       </gh-select></gh-field>
     </div>
-    <div class="small muted">管理员可以修改团队设置与全部议题；成员可以编辑议题与日程。</div>`;
+    ${fieldHTML({ label: '技能', name: 'skills', value: skillText, hint: '逗号分隔；后缀 + 表示熟练、! 表示精通，例如：前端!, 登录+' })}
+    <div class="small muted">管理员可以修改团队设置与全部议题；成员可以编辑议题与日程。技能用于引擎的负责人建议。</div>`;
 
   return openDialog({
     title: member ? `编辑成员 ${member.display_name || member.username}` : '添加成员',
@@ -106,7 +118,9 @@ export function openMemberDialog(member = null, onSaved = null) {
         title: String(values.title || ''),
         role: values.role || 'member',
       };
+      const skillsValue = parseSkillText(values.skills);
       if (member) {
+        payload.skills = skillsValue;
         await api.patch(`/api/teams/${encodeURIComponent(slug)}/members/${encodeURIComponent(member.username)}`, payload);
         toast('成员信息已保存');
       } else {
@@ -119,6 +133,18 @@ export function openMemberDialog(member = null, onSaved = null) {
       return true;
     },
   });
+}
+
+/* "前端!, 登录+" → [{name:'前端', level:3}, {name:'登录', level:2}] */
+function parseSkillText(text) {
+  const raw = String(text || '');
+  return raw.split(/[,，;；\n]/).map((part) => part.trim()).filter(Boolean).slice(0, 20).map((part) => {
+    const match = /^(.*?)([!+＋！])?$/.exec(part);
+    const name = String((match && match[1]) || part).trim().slice(0, 24);
+    const mark = match && match[2];
+    const level = mark === '!' || mark === '！' ? 3 : (mark === '+' || mark === '＋' ? 2 : 1);
+    return { name, level, source: 'self' };
+  }).filter((item) => item.name);
 }
 
 function pickAvatarFile() {

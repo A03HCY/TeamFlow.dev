@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
@@ -37,12 +38,22 @@ from ..services.edge.gateway import (
     registry,
 )
 from ..services.edge.ingest import event_dict, ingest, recent_events
-from ..services.inference import audit, pipeline
+from ..services.inference import apply as apply_service
+from ..services.inference import audit, pipeline, proposals
 from ..services.inference.events import EventRejected, parse_envelope
 from ..services.inference.worker import get_worker, job_dict, pending_count
-from ..services.engine import available
+from ..services.engine import available, load_engine_config
+from ..services.issues import find_by_number
+from ..services.milestones import get_by_number as get_milestone
 from ..db.base import utcnow_iso
-from ..db.engine_models import CodeEvent, InferenceAudit, InferenceJob, Insight
+from ..db.models import Issue
+from ..db.engine_models import (
+    CodeEvent,
+    InferenceAudit,
+    InferenceJob,
+    Insight,
+    InsightEvent,
+)
 from ..db.session import session_scope
 from sqlalchemy import select
 
@@ -251,7 +262,6 @@ def _issue_numbers(session, insights) -> dict[int, int]:
     ids = {item.issue_id for item in insights if item.issue_id}
     if not ids:
         return {}
-    from ..db.models import Issue
 
     return {
         row.id: row.number
@@ -367,6 +377,130 @@ async def reject_insight(
         )
         payload = pipeline.insight_dict(insight)
     return {"ok": True, "insight": payload}
+
+
+# ---------------------------------------------------------------- 规划与提案
+
+@router.post("/engine/proposals")
+def create_proposal(
+    access: TeamAccess = Depends(team_access),
+    body: dict = Depends(read_body),
+) -> dict:
+    """按需生成一条提案（拆分 / 任务树 / 验收标准 / 负责人）。"""
+    access.require_edit()
+    _require_engine()
+    session, team = access.session, access.team
+    kind = str(body.get("kind") or "split").strip().lower()
+    issue = None
+    milestone = None
+    if body.get("issue") not in (None, ""):
+        number = issue_service_number(body.get("issue"))
+        issue = find_by_number(session, team.id, number)
+        if issue is None:
+            raise ApiError("议题不存在", 404)
+    if body.get("milestone") not in (None, ""):
+        number = issue_service_number(body.get("milestone"))
+        milestone = get_milestone(session, team.id, number)
+        if milestone is None:
+            raise ApiError("里程碑不存在", 404)
+    insight = proposals.build_proposal(session, team, kind, issue=issue, milestone=milestone)
+    if insight is None:
+        return {"ok": True, "created": False, "insight": None,
+                "message": "当前没有可拆分的依据（缺少代码事件或清单项）"}
+    insight_id = insight.id
+    payload = pipeline.insight_dict(
+        insight,
+        events=proposals_events(session, insight_id),
+        issue_number=issue.number if issue is not None else None,
+    )
+    return {"ok": True, "created": True, "insight": payload, "preview": apply_service.preview(insight)}
+
+
+@router.post("/engine/insights/{insight_id}/apply")
+async def apply_insight(
+    insight_id: int,
+    access: TeamAccess = Depends(team_access),
+    ctx: Ctx = Depends(get_ctx),
+) -> dict:
+    """确认并执行提案：默认按团队配置的 ``dry_run`` 只回预览。"""
+    access.require_edit()
+    _require_engine()
+    session = access.session
+    insight = session.get(Insight, int(insight_id))
+    if insight is None or insight.team_id != access.id:
+        raise ApiError("洞察不存在", 404, code="insight_not_found")
+    if insight.kind == "progress":
+        raise ApiError("进度洞察请在引擎页确认，不通过该接口执行", 400)
+    if insight.state != "draft":
+        raise ApiError(f"当前状态是 {insight.state}，只有草稿可以执行", 409, code="bad_state")
+    try:
+        body = await read_body(ctx.request)
+    except ApiError:
+        body = {}
+    cfg = load_engine_config(session, access.id)
+    dry_run = bool(cfg.dry_run)
+    if isinstance(body, dict) and "dry_run" in body:
+        dry_run = bool(body.get("dry_run"))
+    actor_id, actor_name = ctx.actor()
+    result = apply_service.execute(
+        session, access.team, insight,
+        actor_id=actor_id, actor_name=actor_name, dry_run=dry_run,
+    )
+    payload = pipeline.insight_dict(
+        insight,
+        events=proposals_events(session, insight.id),
+        issue_number=_issue_number_of(session, insight),
+    )
+    return {**result, "ok": True, "insight": payload}
+
+
+@router.post("/engine/insights/{insight_id}/revert")
+def revert_insight(
+    insight_id: int,
+    access: TeamAccess = Depends(team_access),
+    ctx: Ctx = Depends(get_ctx),
+) -> dict:
+    access.require_edit()
+    _require_engine()
+    session = access.session
+    insight = session.get(Insight, int(insight_id))
+    if insight is None or insight.team_id != access.id:
+        raise ApiError("洞察不存在", 404, code="insight_not_found")
+    actor_id, actor_name = ctx.actor()
+    result = apply_service.revert(
+        session, access.team, insight, actor_id=actor_id, actor_name=actor_name
+    )
+    payload = pipeline.insight_dict(
+        insight,
+        events=proposals_events(session, insight.id),
+        issue_number=_issue_number_of(session, insight),
+    )
+    return {**result, "insight": payload}
+
+
+def issue_service_number(value) -> int:
+    text = str(value).strip().lstrip("#")
+    if not text.isdigit():
+        raise ApiError("编号必须是数字")
+    return int(text)
+
+
+def _issue_number_of(session, insight) -> int | None:
+    """洞察关联议题的团队内编号（议题可能已被删除）。"""
+    if not insight.issue_id:
+        return None
+    return session.scalar(select(Issue.number).where(Issue.id == insight.issue_id))
+
+
+def proposals_events(session, insight_id: int) -> list[InsightEvent]:
+    """`pipeline.insight_dict` 需要 ORM 行（自己会把 detail 反序列化）。"""
+    return list(
+        session.scalars(
+            select(InsightEvent)
+            .where(InsightEvent.insight_id == insight_id)
+            .order_by(InsightEvent.seq)
+        )
+    )
 
 
 # ---------------------------------------------------------------- 作业与审计

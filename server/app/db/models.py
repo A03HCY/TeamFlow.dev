@@ -5,6 +5,7 @@ from typing import Optional
 
 from sqlalchemy import (
     Column,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -81,6 +82,8 @@ class TeamMember(Base):
     )
     role: Mapped[str] = mapped_column(String(20), nullable=False, default="member")
     joined_at: Mapped[str] = mapped_column(String(32), nullable=False, default=utcnow_iso)
+    # 新增列：技能标签 JSON，形如 [{"name": "fastapi", "level": 3, "source": "self"}]
+    skills: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
 
 
 class SessionRow(Base):
@@ -126,6 +129,8 @@ class Milestone(Base):
     number: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     title: Mapped[str] = mapped_column(String(160), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=True, default="")
+    # 新增列：验收标准（Markdown 勾选清单），推断阶段判断「是否达标」的依据
+    acceptance: Mapped[str] = mapped_column(Text, nullable=False, default="")
     state: Mapped[str] = mapped_column(String(20), nullable=True, default="open")
     # 新增列：scheduled（按日期排期，默认）| continuous（长期持续，没有终点）
     kind: Mapped[str] = mapped_column(String(16), nullable=False, default="scheduled")
@@ -145,6 +150,7 @@ class Issue(Base):
         Index("idx_issues_team", "team_id", "state"),
         Index("idx_issues_ms", "milestone_id"),
         Index("idx_issues_week", "team_id", "plan_week"),
+        Index("idx_issues_parent", "parent_id", "sort_order"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -169,6 +175,14 @@ class Issue(Base):
     due_date: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
     # 新增列：周计划（ISO 周，形如 ``2026-W45``）；与「截止日期」是两个维度
     plan_week: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
+    # 新增列：子议题指向父议题（NULL = 顶层）；深度上限 3，环检测在服务层做
+    parent_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("issues.id", ondelete="SET NULL"), nullable=True
+    )
+    # 新增列：同级/子级排序
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 新增列：预估工时（小时），用于「超预估 → 建议拆分」与负载建议
+    estimate_hours: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     created_at: Mapped[str] = mapped_column(String(32), nullable=False, default=utcnow_iso)
     updated_at: Mapped[str] = mapped_column(String(32), nullable=False, default=utcnow_iso)
     closed_at: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)

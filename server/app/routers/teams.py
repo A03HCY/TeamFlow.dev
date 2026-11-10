@@ -258,6 +258,18 @@ def update_member(username: str, body: dict = Depends(read_body),
         if role != current:
             changed.append("角色")
 
+    skills = None
+    if "skills" in body:
+        skills = body.get("skills")
+        if not isinstance(skills, list):
+            raise ApiError("skills 必须是数组")
+        member_row = session.get(TeamMember, (team.id, user.id))
+        if member_row is not None:
+            dumped = team_service.dump_skills(skills)
+            if dumped != (member_row.skills or "[]"):
+                changed.append("技能")
+            member_row.skills = dumped
+
     if not changed:
         raise ApiError("没有需要更新的字段")
 
@@ -272,10 +284,13 @@ def update_member(username: str, body: dict = Depends(read_body),
     actor_id, actor_name = access.ctx.actor()
     activity.log(session, team.id, actor_id, actor_name, "updated", "member", user.id,
                  user.display_name, "更新了" + "、".join(changed))
+    member = session.get(TeamMember, (team.id, user.id))
     return {"ok": True, "member": {"id": user.id, "username": user.username,
                                    "display_name": user.display_name,
                                    "title": user.title or "",
                                    "role": current if role is None else role,
+                                   "skills": team_service.parse_skills(
+                                       member.skills if member is not None else "[]"),
                                    "can_login": bool((user.password_hash or "").strip())}}
 
 

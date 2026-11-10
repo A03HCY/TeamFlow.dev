@@ -55,7 +55,12 @@ export const PRIORITY_OPTIONS = [
 
 export async function openIssueDialog(options = {}) {
   const { slug = S.detail.slug, issue = null, defaults = {}, onSaved = null } = options;
-  const meta = await loadMeta(slug);
+  const [meta, issueData] = await Promise.all([
+    loadMeta(slug),
+    api.get(`/api/teams/${encodeURIComponent(slug)}/issues`, { state: 'all', limit: 300 })
+      .catch(() => ({ issues: [] })),
+  ]);
+  const allIssues = Array.isArray(issueData.issues) ? issueData.issues : [];
   const members = Array.isArray(S.detail && S.detail.members) ? S.detail.members : [];
   const current = issue || {};
   const value = (key, fallback) => (current[key] !== undefined && current[key] !== null ? current[key] : (fallback !== undefined ? fallback : defaults[key]));
@@ -65,6 +70,27 @@ export async function openIssueDialog(options = {}) {
   const assigneeOptions = [{ value: '', label: '未指派' }]
     .concat(members.map((member) => ({ value: member.id, label: member.display_name || member.username })));
   const selectedLabels = Array.isArray(current.labels) ? current.labels.map((label) => label.id) : [];
+
+  /* 可选父议题：排除自己与自己的所有后代，避免前端就能造出环 */
+  const blocked = new Set();
+  if (issue && issue.id) {
+    blocked.add(issue.id);
+    let added = true;
+    while (added) {
+      added = false;
+      for (const item of allIssues) {
+        if (item.parent_id && blocked.has(item.parent_id) && !blocked.has(item.id)) {
+          blocked.add(item.id);
+          added = true;
+        }
+      }
+    }
+  }
+  const parentOptions = [{ value: '', label: '无（顶层议题）' }]
+    .concat(allIssues
+      .filter((item) => !blocked.has(item.id))
+      .map((item) => ({ value: item.id, label: `#${item.number} ${item.title}` })));
+  const parentDefault = current.parent_id || defaults.parent_id || '';
 
   const body = `
     <gh-field label="标题" hint="一句话说明要解决的问题">
@@ -78,6 +104,8 @@ export async function openIssueDialog(options = {}) {
       ${fieldHTML({ label: '优先级', name: 'priority', type: 'select', options: PRIORITY_OPTIONS, value: value('priority', 'medium') })}
       ${fieldHTML({ label: '里程碑', name: 'milestone_id', type: 'select', options: milestoneOptions, value: current.milestone_id || '' })}
       ${fieldHTML({ label: '指派给', name: 'assignee_id', type: 'select', options: assigneeOptions, value: current.assignee_id || '' })}
+      ${fieldHTML({ label: '父议题', name: 'parent', type: 'select', options: parentOptions, value: parentDefault, hint: '最多 3 层；父议题的进度只统计子议题' })}
+      ${fieldHTML({ label: '预估工时', name: 'estimate_hours', type: 'number', value: current.estimate_hours ?? '', placeholder: '4' })}
       ${fieldHTML({ label: '截止日期', name: 'due_date', type: 'date' })}
       ${fieldHTML({ label: '计划周', name: 'plan_week', placeholder: '2026-W45' })}
     </div>
@@ -105,6 +133,7 @@ export async function openIssueDialog(options = {}) {
     onSubmit: async (values) => {
       const title = String(values.title || '').trim();
       if (!title) { toast('请填写议题标题', 'err'); return false; }
+      const parentValue = String(values.parent ?? '').trim();
       const payload = {
         title,
         body: String(values.body || ''),
@@ -112,10 +141,14 @@ export async function openIssueDialog(options = {}) {
         priority: values.priority || 'medium',
         milestone_id: toId(values.milestone_id),
         assignee_id: toId(values.assignee_id),
+        estimate_hours: values.estimate_hours === '' || values.estimate_hours === undefined
+          ? null : Number(values.estimate_hours),
         due_date: values.due_date ? String(values.due_date).slice(0, 10) : null,
         plan_week: values.plan_week ? String(values.plan_week).trim() : null,
         label_ids: toIdList(values.label_ids),
       };
+      if (parentValue) payload.parent = toId(parentValue);
+      else if (current.parent_id) payload.parent = '';
       const data = issue
         ? await api.patch(`/api/teams/${encodeURIComponent(slug)}/issues/${issue.number}`, payload)
         : await api.post(`/api/teams/${encodeURIComponent(slug)}/issues`, payload);

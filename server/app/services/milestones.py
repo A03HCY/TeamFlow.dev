@@ -88,6 +88,7 @@ def create(session: Session, team: Team, data: dict) -> Milestone:
         number=next_milestone_number(session, team.id),
         title=title[:120],
         description=str(data.get("description") or "")[:4000],
+        acceptance=str(data.get("acceptance") or "")[:8000],
         state="open",
         kind=kind,
         start_date=start,
@@ -122,6 +123,9 @@ def update(session: Session, milestone: Milestone, data: dict) -> tuple[Mileston
         touched = True
     if "description" in data:
         milestone.description = str(data.get("description") or "")[:4000]
+        touched = True
+    if "acceptance" in data:
+        milestone.acceptance = str(data.get("acceptance") or "")[:8000]
         touched = True
     for key in ("start_date", "due_date"):
         if key in data:

@@ -9,7 +9,8 @@ TeamFlow 是一个面向小团队的研发协作工作台：议题（Issue）、
 - 单页应用：由后端 `static` 目录托管，任意非 API 路径回退到 `index.html`。
 - 改型进行中：正在把工作台升级为「端侧探针 + 云端多智能体推理 + 人机确认 + 自动写回」的进度推断系统，
   引擎为 [orchify](https://github.com/)（`orchify>=0.0.2`）。方案见 `docs/改型方案-多智能体进度推断.md`，
-  当前完成 **P0（服务端地基 + 端侧通信 SDK）** 与 **P1（WS 网关 + 配对 + 规则推断 + 洞察收件箱 + 引擎页面）**。
+  当前完成 **P0（服务端地基 + 端侧通信 SDK）**、**P1（WS 网关 + 配对 + 规则推断 + 洞察收件箱 + 引擎页面）**
+  与 **P2.5（议题层级 + 规划提案 + 验收标准 + 技能建议）**。
 
 ## 目录结构
 
@@ -31,14 +32,16 @@ TeamFlow.dev/
 │  │  │                     # schedules / week / ai / teams / edge(引擎 REST + WS) / avatars
 │  │  └─ services/          # 业务逻辑（议题、里程碑、日程、周计划、概览、序列化…）
 │  │     ├─ engine/         # orchify 适配层：配置/LLM/Agent/结构化输出/hooks/落盘/预算/密钥
-│  │     ├─ inference/      # 推理业务：事件包校验、审计哈希链、规则推断(pipeline/rules)、作业 worker
-│  │     └─ edge/           # 端侧接入：设备配对(devices)、WS 网关(gateway)、事件入库(ingest)
+│  │     ├─ inference/      # 推理业务：事件包校验、审计哈希链、规则推断(rules/pipeline)、
+│  │     │                  # 作业 worker、规划提案(proposals)、提案执行器(apply)
+│  │     ├─ edge/           # 端侧接入：设备配对(devices)、WS 网关(gateway)、事件入库(ingest)
+│  │     └─ hierarchy.py    # 议题层级：深度/环校验、叶子口径、父议题关闭守卫
 │  ├─ static/               # 前端（gh-ui 重构）
 │  │  ├─ index.html
 │  │  ├─ vendor/            # gh-ui.js / gh-ui.css（来自 GitHub UI/dist，原样拷贝）
 │  │  ├─ css/app.css        # 业务样式（在 gh-ui 设计令牌之上扩展）
 │  │  └─ js/                # api / store / ui / shell / router / app + pages/*（含 engine 页面）
-│  └─ tests/                # pytest（61 例：API 冒烟 + 引擎地基 + 端侧接入 P1）
+│  └─ tests/                # pytest（75 例：API 冒烟 + 引擎地基 + 端侧接入 P1 + 层级与提案 P2.5）
 ├─ client/                  # 端侧（P0 仅交付通信 SDK）
 │  └─ core/network.py       # EdgeClient：WS 长连接/重连/心跳/离线队列/反向查询
 ├─ docs/                    # 改型方案
@@ -49,54 +52,78 @@ TeamFlow.dev/
 
 ```powershell
 cd server
-python -m pip install -r requirements.txt
-python main.py                      # 默认 http://127.0.0.1:8000
-python main.py --host 0.0.0.0 --port 8080 --reload
+pip install -r requirements.txt
+python main.py --port 8000
 ```
 
-首次启动会在 `server/data.db` 建表并写入演示数据（2 个团队、16 个议题等）。
-API 文档：<http://127.0.0.1:8000/api/docs>。
+浏览器打开 `http://127.0.0.1:8000`。启动器支持 `--host`（默认 `127.0.0.1`）、`--port`（默认 `8000`）、
+`--reload`、`--log-level`、`--env-file`；端口被占用时会给出提示，而不是直接抛出 uvicorn 的异常。
 
-演示账号（密码均为 `demo1234`）：`linwei`、`chenmo`、`suxiao`、`zhouyuan`。
-免登录模式下侧栏「操作身份」可切换匿名操作者；写入受「编辑口令」保护（未设置口令时可直接编辑）。
+默认带一套演示数据（两个团队 `default` / `infra`、十几条议题、里程碑、日程）：
+
+| 账号 | 姓名 | 岗位 |
+| --- | --- | --- |
+| `linwei` | 林薇 | 产品负责人 |
+| `chenmo` | 陈默 | 后端工程师 |
+| `suxiao` | 苏晓 | 前端工程师 |
+| `zhouyuan` | 周远 | 测试工程师 |
+
+演示口令统一是 `demo1234`。关掉演示数据：`TEAMFLOW_SEED=0`（首次建库时生效）。
+默认 `require_login=0`，即无需登录即可浏览，写操作通过侧栏「操作身份」切换身份、或在「设置 → 编辑权限」
+里加一道编辑口令。
 
 ## 配置
 
-全部通过环境变量或 `server/.env` 配置（`.env` 不会覆盖已存在的环境变量），详见 `server/.env.example`：
+配置来自 `server/.env`（可复制 `.env.example`），进程环境变量优先。
 
 | 变量 | 说明 | 默认 |
 | --- | --- | --- |
-| `TEAMFLOW_DB_URL` / `DATABASE_URL` / `TMT_DB` | 数据库 URL，支持 `sqlite:///路径`、`postgresql://`、`mysql://` | `sqlite:///server/data.db` |
-| `TEAMFLOW_SEED` | 是否写入演示数据 | `1` |
+| `TEAMFLOW_DB_URL` / `DATABASE_URL` / `TMT_DB` | 数据库 URL，按此优先级取第一个 | `sqlite:///server/data.db` |
+| `TEAMFLOW_SEED` | 首次建库是否写入演示数据 | `1` |
 | `TEAMFLOW_BACKUP` / `TEAMFLOW_BACKUP_DIR` | 写操作前是否备份 SQLite / 备份目录 | `1` / `server/backups` |
 | `TEAMFLOW_AVATAR_DIR` | 头像文件目录 | `server/data/avatars` |
-| `TEAMFLOW_COOKIE_SECURE` / `TEAMFLOW_HSTS` | 反向代理下的 Cookie / HSTS 策略 | 跟随协议 / `1` |
+| `TEAMFLOW_COOKIE_SECURE` / `TEAMFLOW_HSTS` | Cookie 是否强制 Secure / 是否发送 HSTS | 跟随协议 / `1` |
 | `TEAMFLOW_ENGINE` | 推理引擎总开关，`0` 时整块关闭（不建引擎目录、不加载 orchify） | `1` |
 | `TEAMFLOW_ENGINE_DIR` | 引擎运行数据目录（事件 JSONL / 检查点 / runs.db / 向量） | `server/data/engine` |
-| `TEAMFLOW_ENGINE_BASE_URL` / `_MODEL` / `_API_KEY` | 团队模型配置的运维兜底（优先级高于设置页） | 空 |
-| `TEAMFLOW_SECRET_KEY` | 加密团队密钥（Fernet）的主密钥；不配则降级明文并在设置页提示 | 空 |
+| `TEAMFLOW_INFERENCE_WORKER` | 是否启动推理作业后台 worker，`0` 时改为手动 drain | `1` |
+| `TEAMFLOW_ENGINE_BASE_URL` / `_MODEL` / `_API_KEY` | 推理模型端点（OpenAI 兼容），覆盖团队配置 | 空 |
+| `TEAMFLOW_SECRET_KEY` | 加密 `team_engine.api_key` 的主密钥（不少于 24 字符） | 空 |
 
-AI 助手（议题草稿、日程导入）的接口地址、模型与密钥保存在数据库 `settings` 表，
-在「设置 → AI 助手」中填写，不走环境变量；推理引擎则优先读 `team_engine` 表，
-没有时回落到同一组 `settings`（`ai_base_url` / `ai_model` / `ai_api_key`），
-运维可以用 `TEAMFLOW_ENGINE_*` 强制覆盖。
+数据库 URL 支持 `sqlite:///相对路径`、`sqlite:///:memory:`、`postgresql://`、`mysql://`。
+AI 助手的模型配置（`ai_base_url` / `ai_api_key` / `ai_model`）存在数据库 `settings` 表，在「设置 → AI 助手」
+中填写，不走环境变量；推理引擎则优先读 `team_engine` 表，其次读同一组 `ai_*` 设置，最后才看 `TEAMFLOW_ENGINE_*`
+环境变量。
 
 ## 功能
 
-- **概览**：统计卡、里程碑进度、最近动态、成员负载、近 14 天新建/完成趋势。
-- **议题**：筛选（状态机/优先级/负责人/里程碑/标签/搜索/排序）、新建与编辑、评论、关闭与重开、删除。
-- **看板**：待办 / 进行中 / 已完成三列，拖拽卡片即改状态。
-- **周计划**：按周查看成员计划、待排期议题一键排入本周、未完成议题顺延到下一周。
-- **里程碑**：计划型与持续型两种，进度按关联议题自动统计。
-- **路线图**：里程碑时间轴（含今天标线）与持续性里程碑。
-- **日程**：每周重复 / 单次日程的周历视图、参与人、颜色、iCalendar 订阅地址。
-- **设置**：团队资料与公开范围、成员与角色（owner/admin/member）、标签管理、编辑口令、登录开关、AI 配置、重置数据。
+- **概览**：未关闭 / 进行中 / 已完成 / 完成率四项统计、里程碑进度、最近动态、成员负载、近 14 天新建与关闭趋势。
+- **议题**：按状态、负责人、里程碑、标签与层级筛选；支持父子议题（最多 3 层）、预估工时、评论、标签与关闭/重新打开。
+- **看板**：待办 / 进行中 / 已完成三列，拖拽即改状态。
+- **周计划**：按成员分组的本周计划、未排期议题一键排入、上周未完成项顺延。
+- **里程碑**：进度条（只统计叶子议题）、验收标准清单、计划型 / 持续型两种类型。
+- **路线图**：按时间轴排列里程碑，含完成度和今天的标记。
+- **日程**：团队周历（每周重复 / 单次）、参与人、ICS 订阅。
+- **设置**：团队资料与公开范围、成员与技能、标签、编辑权限、登录策略、AI 助手、危险操作。
+- **引擎**（改型新增）：设备配对、在线状态、洞察收件箱、规划提案、审计链校验。
 
-## 推理引擎（改型 P0 + P1）
+### 议题层级
+
+`issues.parent_id` 自引用构成父子关系，索引 `idx_issues_parent(parent_id, sort_order)`：
+
+- 编号仍是团队内的全局序号（子议题也是 `#n`，不会出现 `#12.1`）。
+- 深度上限 3 层；移动时做环检测与子树深度校验，跨团队挂载会被拒绝。
+- 子议题默认继承父议题的里程碑，标签与负责人不继承。
+- 有子议题的父议题**不能直接删除**；子议题未完成时**不能把父议题关闭**（父议题改为提示「可以关闭了」）。
+- **统计口径只算最底层议题**：议题列表计数、概览统计、成员负载、里程碑进度、团队计数全部按叶子议题计算，
+  父议题不重复计数；列表页会显示「父议题 N」与「统计只算叶子议题」提示。
+- 排期只落叶子议题；列表支持 `?parent=none`（仅顶层）与 `?parent=<编号>`（该议题的子级）。
+
+## 推理引擎（改型 P0 + P1 + P2.5）
 
 目标是把「人手动改状态」升级为「保存代码 → 端侧脱敏上报 → 多智能体推断 → 人确认 → 写回」。
-P0 落**服务端地基**与**端侧通信 SDK**；P1 落**端侧接入链路**与**规则推断的洞察收件箱**，
-仍未接入 LLM 调用与任何自动写回。
+P0 落**服务端地基**与**端侧通信 SDK**；P1 落**端侧接入链路**与**规则推断的洞察收件箱**；
+P2.5 落**议题层级**、**规划提案**（拆分 / 任务树 / 验收标准 / 负责人建议）与**可撤销的执行器**。
+仍未接入 LLM 调用（P2）与外部系统写回（P3）。
 
 已交付：
 
@@ -113,8 +140,8 @@ P0 落**服务端地基**与**端侧通信 SDK**；P1 落**端侧接入链路**�
   四个角色 Agent 与预算切分（`agents`/`budget`）、异步结构化输出与防幻觉闸门（`structured`）、
   事件订阅与卸载（`hooks`）、事件/检查点/runs.db 落盘（`persist`）、密钥加密（`secrets`）。
 - **端侧 SDK**（`client/core/network.py`）：`EdgeClient` 负责 WS 长连接（指数退避重连）、心跳、
-  JSONL 离线队列（按 `event_uid` 去重、上限 500 条）、`ack` 处理、`pause/resume` 背压、
-  以及服务端反向查询（`on_query` 回传文件指纹）。依赖 `websockets`，仅在真正连接时导入。
+  JSONL 离线队列（按 `event_uid` 去重、上限 500 条、ack 超时重投最多 5 次）、`ack` 处理、
+  `pause/resume` 背压，以及服务端反向查询（`on_query` 回传文件指纹）。依赖 `websockets`，仅在真正连接时导入。
 
 ```python
 from client.core.network import EdgeClient, build_event, new_event_uid, sha256_file
@@ -158,6 +185,28 @@ await client.run_forever()
   洞察卡片（证据 chip、置信度进度条、建议状态）、设备表（暂停·恢复·吊销）、审计链与最近事件，
   以及配对码弹窗（含 `EdgeClient` 用法与一键复制）。
 
+### P2.5：议题层级、规划提案与验收标准
+
+- **议题层级**（`app/services/hierarchy.py`）：`issues.parent_id / sort_order / estimate_hours`，
+  深度上限 3，环检测、深度校验、跨团队拒绝；有子议题的父议题不能直接删除，子议题未完成时不能关闭父议题
+  （409 `has_children`）；四处统计统一改为叶子口径。
+- **数据补全**：`team_members.skills`（JSON 数组，`level 1..3`，设置页用「前端!, 登录+」语法编辑）、
+  `milestones.acceptance`（验收标准清单，里程碑卡与编辑弹窗都可维护）。
+- **规划提案**（`app/services/inference/proposals.py`，规则版、不依赖 LLM），`kind ∈ split / plan / criteria / assignment`：
+  - `split`：按代码事件的文件顶层目录分组（或退回议题正文清单）建议子议题，单次最多 8 条；
+  - `plan`：按里程碑验收标准生成任务树，同名议题自动去重；
+  - `criteria`：里程碑缺验收标准时，从描述里抽取 `- [ ]` 清单；
+  - `assignment`：`score = 0.5×技能覆盖 + 0.3×历史同类完成率 + 0.2×空闲度`，只给建议与理由。
+  同一 `dedupe_key` 30 分钟内合并为一条洞察（`insight_events` 记 `merged`），不会刷屏。
+- **提案执行器**（`app/services/inference/apply.py`）：`POST /engine/insights/{id}/apply` 默认 `dry_run`
+  （只回预览、写 `previewed` 事件与审计）；真实执行在**单事务**内按序执行白名单动作
+  （`create_issue / create_milestone / update_issue / update_milestone / close_issue / assign`），
+  并记录 `before` 快照；`POST /engine/insights/{id}/revert` 可在 **5 分钟内**整体撤销
+  （删除新建的议题/里程碑、恢复被改字段；若已被他人加评论或子议题则拒绝）。
+- **前端**：议题详情显示面包屑、子议题进度、预估工时，并禁止误关父议题；议题列表新增「仅顶层议题」筛选；
+  引擎页新增「生成提案」入口、提案卡片（类型徽章、动作预览、`预览并应用` / `驳回`）
+  与「最近已应用（5 分钟内可撤销）」。
+
 P2 起才做：LLM Analyst（`OpenAICompat` + 结构化输出）、人工确认后写回议题状态/周计划/评论、
 服务端驱动端侧的定向取证，以及 GitHub / Jira 写回（P3）。
 
@@ -187,3 +236,6 @@ python -m pytest tests -q
   非法事件包 `ack rejected`、规则推断产出洞察并合并重复洞察、未 push / 无测试降级、
   纯文档改动被闸门跳过、驳回与二次驳回 409、审计链校验（配对→绑定→创建→驳回）、REST 兜底上报、
   `TEAMFLOW_ENGINE=0` 时配对返回 503，以及路径分类/周次换算/配对码不落明文等纯函数用例。
+- `tests/test_edge_p2.py`：子议题只算叶子、子议题继承里程碑、自挂/反挂环检测、深度上限、
+  父议题关闭与删除守卫、提升为顶层、成员技能往返、`split` 提案 apply（dry-run / 真实 / 二次 409 / revert）、
+  重复提案合并、无证据提案降置信度、`criteria` 写入验收标准、负责人打分优先命中技能、非法 kind 400。

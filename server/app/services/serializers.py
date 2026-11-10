@@ -74,6 +74,9 @@ def issue_dict(issue: Issue, comment_count: int | None = None) -> dict:
         "author_avatar_url": avatar_url(author),
         "due_date": issue.due_date,
         "plan_week": issue.plan_week,
+        "parent_id": issue.parent_id,
+        "sort_order": issue.sort_order or 0,
+        "estimate_hours": issue.estimate_hours,
         "created_at": issue.created_at,
         "updated_at": issue.updated_at,
         "closed_at": issue.closed_at,
@@ -108,14 +111,23 @@ def comment_dict(comment: Comment) -> dict:
 
 
 def milestone_counts(session: Session, team_id: int) -> dict[int, tuple[int, int]]:
-    """{milestone_id: (total, closed)}，一条聚合查询搞定，避免 N+1。"""
+    """{milestone_id: (total, closed)}，一条聚合查询搞定，避免 N+1。
+
+    只统计**叶子**议题（没有子议题的），否则父子会被重复计入里程碑进度。
+    """
+    from .hierarchy import leaf_condition
+
     stmt = (
         select(
             Issue.milestone_id,
             func.count(Issue.id),
             func.coalesce(func.sum(case((Issue.state == "closed", 1), else_=0)), 0),
         )
-        .where(Issue.team_id == team_id, Issue.milestone_id.is_not(None))
+        .where(
+            Issue.team_id == team_id,
+            Issue.milestone_id.is_not(None),
+            leaf_condition(),
+        )
         .group_by(Issue.milestone_id)
     )
     return {
@@ -133,6 +145,7 @@ def milestone_dict(milestone: Milestone, counts: dict[int, tuple[int, int]]) -> 
         "number": milestone.number,
         "title": milestone.title,
         "description": milestone.description or "",
+        "acceptance": milestone.acceptance or "",
         "state": milestone.state or "open",
         "kind": milestone.kind or "scheduled",
         "start_date": milestone.start_date,

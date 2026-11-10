@@ -34,6 +34,11 @@ export async function render(view, route) {
   const comments = Array.isArray(data.comments) ? data.comments : [];
   const canEdit = !!data.can_edit || S.canEdit;
   const closed = issue.state === 'closed';
+  const ancestors = Array.isArray(data.ancestors) ? data.ancestors : [];
+  const children = Array.isArray(data.children) ? data.children : [];
+  const progress = data.progress || { total: 0, closed: 0, percent: 0 };
+  const canClose = data.can_close !== false;
+  const depth = ancestors.length;
   const assignee = issue.assignee_id
     ? { display_name: issue.assignee_name, avatar_url: issue.assignee_avatar_url }
     : null;
@@ -44,13 +49,20 @@ export async function render(view, route) {
     <div class="row" style="gap:8px">
       <a class="small muted row" style="gap:2px" href="/${esc(slug)}/issues"><gh-icon name="chevron-left" size="14"></gh-icon> 返回议题列表</a>
     </div>
+    ${ancestors.length ? `<div class="crumbs">
+      ${ancestors.map((item) => `<a class="small muted" href="/${esc(slug)}/issues/${esc(item.number)}">#${esc(item.number)} ${esc(item.title)}</a><gh-icon name="chevron-right" size="12"></gh-icon>`).join('')}
+      <span class="small">#${esc(issue.number)} ${esc(issue.title)}</span>
+    </div>` : ''}
 
     <gh-page-head title="#${esc(issue.number)} ${esc(issue.title)}">
       <gh-btn size="sm" data-act="refresh"><gh-icon name="sync" size="14"></gh-icon> 刷新</gh-btn>
-      ${canEdit ? `<gh-btn size="sm" data-act="toggle-state">${closed ? '重新打开' : '关闭议题'}</gh-btn>
+      ${canEdit && depth + 1 < 3 ? `<gh-btn size="sm" data-act="add-child"><gh-icon name="plus" size="14"></gh-icon> 添加子议题</gh-btn>` : ''}
+      ${canEdit ? `<gh-btn size="sm" data-act="toggle-state" ${closed || canClose ? '' : 'disabled'}>${closed ? '重新打开' : '关闭议题'}</gh-btn>
         <gh-btn size="sm" data-act="edit"><gh-icon name="pencil" size="14"></gh-icon> 编辑</gh-btn>
         <gh-btn size="sm" variant="danger" data-act="delete"><gh-icon name="trash" size="14"></gh-icon> 删除</gh-btn>` : ''}
     </gh-page-head>
+
+    ${!closed && !canClose ? `<gh-alert type="warning">还有 ${progress.total - progress.closed} 个子议题未完成，先把子议题关掉再关闭父议题。</gh-alert>` : ''}
 
     <div class="detail">
       <div class="col" style="gap:16px">
@@ -63,6 +75,22 @@ export async function render(view, route) {
           </div>
           <div id="issue-body" class="issue-body"></div>
         </gh-box>
+
+        ${children.length ? `<gh-box title="子议题 (${progress.closed}/${progress.total})">
+          <div class="row" style="justify-content:space-between;margin-bottom:10px">
+            <span class="small muted">完成度 ${progress.percent}%</span>
+            <span class="small muted">子议题关闭后父议题才可关闭</span>
+          </div>
+          <div class="sub-progress"><gh-progress value="${progress.percent}" max="100"></gh-progress></div>
+          <div class="col" style="gap:2px">
+            ${children.map((item) => `<div class="sub-issue" data-number="${esc(item.number)}">
+              <gh-icon name="${item.state === 'closed' ? 'issue-closed' : 'issue-opened'}" size="15"></gh-icon>
+              <a class="grow" href="/${esc(slug)}/issues/${esc(item.number)}">#${esc(item.number)} ${esc(item.title)}</a>
+              ${statusBadge(item.status, true)}
+              <span class="small muted">${item.assignee_name ? esc(item.assignee_name) : '未指派'}</span>
+            </div>`).join('')}
+          </div>
+        </gh-box>` : ''}
 
         <gh-box title="评论 (${comments.length})">
           <div id="comment-list">
@@ -92,6 +120,11 @@ export async function render(view, route) {
           ${attrRow('负责人', assignee ? `<div class="row-tight">${avatarHTML(assignee, 20)}<span>${esc(assignee.display_name || '')}</span></div>` : '')}
           ${attrRow('里程碑', issue.milestone_title ? esc(issue.milestone_title) : '')}
           ${attrRow('计划周', issue.plan_week ? esc(fmtWeek(issue.plan_week)) : '')}
+          ${attrRow('预估工时', issue.estimate_hours ? `${esc(issue.estimate_hours)} 小时` : '')}
+          ${attrRow('父议题', issue.parent_id
+            ? `<a href="/${esc(slug)}/issues/${esc((ancestors.find((item) => item.id === issue.parent_id) || {}).number || '')}">#${esc((ancestors.find((item) => item.id === issue.parent_id) || {}).number || '')}</a>`
+            : '')}
+          ${children.length ? attrRow('子议题', `${progress.closed}/${progress.total} 已完成（${progress.percent}%）`) : ''}
           ${attrRow('截止日期', issue.due_date ? esc(fmtDate(issue.due_date)) : '')}
           ${attrRow('标签', labelChips(issue.labels))}
           ${attrRow('作者', issue.author_name ? `<div class="row-tight">${avatarHTML({ display_name: issue.author_name, avatar_url: issue.author_avatar_url }, 20)}<span>${esc(issue.author_name)}</span></div>` : '')}
@@ -134,6 +167,14 @@ export async function render(view, route) {
     try {
       if (name === 'refresh') { render(view, route); return; }
       if (name === 'edit') { openEdit(); return; }
+      if (name === 'add-child') {
+        openIssueDialog({
+          slug,
+          defaults: { parent_id: issue.id, milestone_id: issue.milestone_id || null },
+          onSaved: () => { invalidateTeam(slug); render(view, route); },
+        });
+        return;
+      }
       if (name === 'toggle-state') {
         const next = closed ? 'open' : 'closed';
         const ok = await confirmAction({

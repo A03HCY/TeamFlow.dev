@@ -98,6 +98,20 @@ p { margin: 0; }
 .issue-row__meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--gh-fg-muted); }
 .issue-row__side { display: flex; align-items: center; gap: 6px; padding-top: 2px; }
 .issue-row__labels { display: flex; gap: 4px; flex-wrap: wrap; }
+.issue-row__lead.is-child { color: var(--gh-fg-muted); }
+
+/* ---------- 议题层级 ---------- */
+.crumbs { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.crumbs a:hover { color: var(--gh-accent); text-decoration: none; }
+.sub-progress { margin: 0 0 10px; }
+.sub-issue {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border: 1px solid var(--gh-border-muted); border-radius: var(--gh-radius);
+  background: var(--gh-canvas); font-size: 13px;
+}
+.sub-issue a { color: var(--gh-fg); }
+.sub-issue a:hover { color: var(--gh-accent); text-decoration: none; }
+.sub-issue.is-closed a { color: var(--gh-fg-muted); text-decoration: line-through; }
 
 /* ---------- 看板 ---------- */
 .board { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; align-items: start; }
@@ -115,6 +129,9 @@ p { margin: 0; }
 /* ---------- 里程碑 / 路线图 ---------- */
 .ms-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .ms-progress { margin: 6px 0 4px; }
+.ms-card__acceptance { margin-top: 2px; padding: 8px 10px; border-radius: var(--gh-radius); background: var(--gh-canvas-subtle); border: 1px solid var(--gh-border-muted); }
+.ms-card__acceptance-body { margin-top: 4px; font-size: 12px; }
+.ms-card__acceptance-body ul { margin: 0; padding-left: 18px; }
 .ms-card { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border: 1px solid var(--gh-border); border-radius: var(--gh-radius); background: var(--gh-canvas); }
 .ms-card__head { display: flex; align-items: flex-start; gap: 8px; }
 .ms-card__title { font-weight: 600; font-size: 15px; color: var(--gh-fg); }
@@ -252,6 +269,8 @@ p { margin: 0; }
 .insight-card__summary { font-size: 13px; line-height: 1.6; color: var(--gh-fg); word-break: break-word; }
 .insight-card__refs { display: flex; flex-wrap: wrap; gap: 6px; }
 .insight-card__foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.insight-card.is-proposal { border-left: 3px solid var(--gh-accent); padding-left: 12px; }
+.insight-card__actions { display: flex; flex-direction: column; gap: 2px; padding: 6px 10px; border-radius: var(--gh-radius); background: var(--gh-canvas-subtle); border: 1px solid var(--gh-border-muted); }
 
 /* ---------- 错误 ---------- */
 .error-box { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 48px 16px; text-align: center; }

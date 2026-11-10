@@ -36,9 +36,15 @@ export async function render(view, route) {
     assignee: route.params.get('assignee') || '',
     milestone: route.params.get('milestone') || '',
     label: route.params.get('label') || '',
+    parent: route.params.get('parent') || '',
     sort: route.params.get('sort') || 'updated',
     q: route.params.get('q') || '',
   };
+
+  const parentOptions = [
+    { value: '', label: '全部层级' },
+    { value: 'none', label: '仅顶层议题' },
+  ];
 
   const assigneeOptions = [{ value: '', label: '全部负责人' }]
     .concat([{ value: 'none', label: '未指派' }])
@@ -51,7 +57,7 @@ export async function render(view, route) {
   const statusOptions = [{ value: '', label: '全部状态' }].concat(STATUS_OPTIONS);
   const priorityOptions = [{ value: '', label: '全部优先级' }].concat(PRIORITY_OPTIONS);
 
-  view.innerHTML = `${pageHead('议题', '按状态、负责人、里程碑与标签筛选团队的全部议题', `
+  view.innerHTML = `${pageHead('议题', '按状态、负责人、里程碑、标签与层级筛选团队的全部议题', `
       <gh-btn size="sm" data-act="refresh"><gh-icon name="sync" size="14"></gh-icon> 刷新</gh-btn>
       ${S.canEdit ? '<gh-btn size="sm" variant="primary" data-act="new"><gh-icon name="plus" size="14"></gh-icon> 新建议题</gh-btn>' : ''}
     `)}
@@ -64,6 +70,7 @@ export async function render(view, route) {
         ${fieldHTML({ name: 'assignee', type: 'select', options: assigneeOptions, value: filters.assignee })}
         ${fieldHTML({ name: 'milestone', type: 'select', options: milestoneOptions, value: filters.milestone })}
         ${fieldHTML({ name: 'label', type: 'select', options: labelOptions, value: filters.label })}
+        ${fieldHTML({ name: 'parent', type: 'select', options: parentOptions, value: filters.parent })}
         ${fieldHTML({ name: 'sort', type: 'select', options: SORT_OPTIONS, value: filters.sort })}
       </div>
       <div id="issue-list">
@@ -106,8 +113,9 @@ export async function render(view, route) {
         return;
       }
       const total = counts.total ?? issues.length;
-      const filtering = ['q', 'state', 'status', 'priority', 'assignee', 'milestone', 'label'].some((key) => filters[key]);
-      list.innerHTML = `<div class="list-summary small muted">共 ${total} 个议题 · 未关闭 ${counts.open ?? 0} · 已关闭 ${counts.closed ?? 0}${filtering ? ` · 当前筛选 ${issues.length} 条` : ''}</div>
+      const filtering = ['q', 'state', 'status', 'priority', 'assignee', 'milestone', 'label', 'parent'].some((key) => filters[key]);
+      const parents = counts.parents ?? 0;
+      list.innerHTML = `<div class="list-summary small muted">共 ${total} 个议题 · 未关闭 ${counts.open ?? 0} · 已关闭 ${counts.closed ?? 0}${parents ? ` · 父议题 ${parents}` : ''}${filtering ? ` · 当前筛选 ${issues.length} 条` : ''}<span title="进度与完成率只统计最底层议题，父议题不重复计数"> · 统计只算叶子议题</span></div>
         ${issues.map((issue) => issueRow(issue, { slug, labelLimit: 4 })).join('')}`;
     } catch (error) {
       list.innerHTML = `<div class="error-box"><gh-icon name="alert" size="24"></gh-icon>

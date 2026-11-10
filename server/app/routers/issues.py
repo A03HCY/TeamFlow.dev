@@ -8,7 +8,7 @@ from ..db.base import utcnow_iso
 from ..db.models import Comment, Issue, Label, Milestone
 from ..deps import TeamAccess, read_body, team_access
 from ..errors import ApiError
-from ..services import activity, weekplan
+from ..services import activity, hierarchy, weekplan
 from ..services import issues as issue_service
 from ..services.teams import next_issue_number
 from ..services.serializers import comment_counts, comment_dict, issue_dict, team_summary
@@ -16,11 +16,12 @@ from ..services.serializers import comment_counts, comment_dict, issue_dict, tea
 router = APIRouter(prefix="/api/teams/{team}", tags=["issues"])
 
 
-def _filters(state, status, priority, q, label, assignee, milestone, sort, week=None) -> dict:
+def _filters(state, status, priority, q, label, assignee, milestone, sort, week=None,
+             parent=None) -> dict:
     return {
         "state": state, "status": status, "priority": priority, "q": q,
         "label": label, "label_id": label, "assignee": assignee,
-        "milestone": milestone, "sort": sort, "week": week,
+        "milestone": milestone, "sort": sort, "week": week, "parent": parent,
     }
 
 
@@ -35,6 +36,7 @@ def list_issues(
     milestone: str | None = None,
     week: str | None = None,
     sort: str | None = None,
+    parent: str | None = None,
     access: TeamAccess = Depends(team_access),
 ) -> dict:
     access.require_read("issues")
@@ -45,7 +47,7 @@ def list_issues(
     except ValueError as exc:
         raise ApiError(str(exc)) from exc
     filters = _filters(state, status, priority, q, label, assignee, milestone, sort,
-                       "none" if week and week_value is None else week_value)
+                       "none" if week and week_value is None else week_value, parent)
     # 过滤器按标签名时先换算成 id（URL 里允许写名字更好用）
     if label and not str(label).isdigit():
         found = session.scalar(
@@ -78,7 +80,10 @@ def create_issue(body: dict = Depends(read_body),
         raise ApiError(str(exc), 400) from exc
     body["milestone_id"] = milestone_id
     number = next_issue_number(session, team)
-    issue = issue_service.create_issue(session, team, body, number)
+    try:
+        issue = issue_service.create_issue(session, team, body, number)
+    except LookupError as exc:
+        raise ApiError(str(exc), 400) from exc
     actor_id, actor_name = access.ctx.actor()
     activity.log(session, team.id, actor_id, actor_name, "created", "issue", issue.id,
                  issue.title, f"#{number}")
@@ -98,11 +103,19 @@ def issue_detail(number: int, access: TeamAccess = Depends(team_access)) -> dict
             select(Comment).where(Comment.issue_id == issue.id).order_by(Comment.id)
         )
     )
+    parent = session.get(Issue, issue.parent_id) if issue.parent_id else None
+    children = hierarchy.children_of(session, issue)
+    ancestors = hierarchy.ancestors_of(session, issue)
     return {
         "issue": issue_dict(issue, len(comments)),
         "comments": [comment_dict(comment) for comment in comments],
         "team": team_summary(access.team, access.effective_role()),
         "can_edit": access.can_edit(),
+        "parent": issue_dict(parent) if parent is not None else None,
+        "ancestors": [issue_dict(item) for item in ancestors],
+        "children": [issue_dict(item) for item in children],
+        "progress": hierarchy.rollup(session, issue),
+        "can_close": hierarchy.can_close_parent(session, issue),
     }
 
 
@@ -137,6 +150,12 @@ def delete_issue(number: int, access: TeamAccess = Depends(team_access)) -> dict
     issue = issue_service.find_by_number(session, access.id, number)
     if issue is None:
         raise ApiError("Issue 不存在", 404)
+    if hierarchy.has_children(session, issue):
+        raise ApiError(
+            "该议题下还有子议题，请先迁移或删除子议题",
+            status=409,
+            code="has_children",
+        )
     title = issue.title
     issue_id = issue.id
     session.delete(issue)

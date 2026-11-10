@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from ..db.base import utcnow_iso
 from ..db.models import Issue, Label, Team, TeamMember, User
 from ..security import hash_password
+from . import hierarchy
 from .avatars import url as avatar_url
 from .settings import active_team_id, set_setting
 
@@ -74,6 +75,47 @@ def display_role(role: str | None, require_login: bool) -> str | None:
     return None if require_login else "owner"
 
 
+def parse_skills(raw) -> list[dict]:
+    """``team_members.skills`` 的 JSON 解析：容忍脏数据，永远返回列表。"""
+    import json
+
+    if isinstance(raw, list):
+        items = raw
+    else:
+        try:
+            items = json.loads(raw or "[]")
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(items, list):
+        return []
+    out: list[dict] = []
+    for item in items:
+        if isinstance(item, str):
+            name = item.strip()
+            if name:
+                out.append({"name": name[:40], "level": 2, "source": "self"})
+        elif isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            try:
+                level = int(item.get("level") or 2)
+            except (TypeError, ValueError):
+                level = 2
+            out.append({
+                "name": name[:40],
+                "level": max(1, min(3, level)),
+                "source": str(item.get("source") or "self")[:16],
+            })
+    return out
+
+
+def dump_skills(values) -> str:
+    import json
+
+    return json.dumps(parse_skills(values), ensure_ascii=False)
+
+
 def member_rows(session: Session, team_id: int) -> list[dict]:
     stmt = (
         select(TeamMember, User)
@@ -94,6 +136,7 @@ def member_rows(session: Session, team_id: int) -> list[dict]:
             "title": user.title or "",
             "role": member.role,
             "joined_at": member.joined_at,
+            "skills": parse_skills(member.skills),
             # 卡片成员（新建时没有密码）不能登录，前端据此显示"未开通登录"
             "can_login": bool((user.password_hash or "").strip()),
             "avatar_url": avatar_url(user),
@@ -134,12 +177,14 @@ def active_team(session: Session, user_id: int | None) -> Team | None:
 
 
 def counts(session: Session, team_id: int) -> dict:
+    """团队卡片的计数：只算叶子议题（父子不双计）。"""
+    leaf = hierarchy.leaf_condition()
     total = session.scalar(
-        select(func.count()).select_from(Issue).where(Issue.team_id == team_id)
+        select(func.count()).select_from(Issue).where(Issue.team_id == team_id, leaf)
     ) or 0
     open_count = session.scalar(
         select(func.count()).select_from(Issue).where(
-            Issue.team_id == team_id, Issue.state == "open"
+            Issue.team_id == team_id, Issue.state == "open", leaf
         )
     ) or 0
     return {"total": total, "open": open_count}

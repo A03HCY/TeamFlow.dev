@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..db.base import today_iso, utcnow_iso
 from ..db.models import Issue, Team, TeamMember, User
-from . import activity
+from . import activity, hierarchy
 from .serializers import milestone_counts, milestone_dict
 from .teams import member_rows
 
@@ -23,6 +23,7 @@ def stats(session: Session, team_id: int) -> dict:
     查询数从 15 降到 9（见 README「性能」一节）。
     """
     today = today_iso()
+    leaf = hierarchy.leaf_condition()
     total, open_count, todo, in_progress, done, high_open, overdue = session.execute(
         select(
             func.count(Issue.id),
@@ -36,8 +37,13 @@ def stats(session: Session, team_id: int) -> dict:
                 (Issue.state == "open")
                 & Issue.due_date.is_not(None)
                 & (Issue.due_date < today), 1), else_=0)), 0),
-        ).where(Issue.team_id == team_id)
+        ).where(Issue.team_id == team_id, leaf)
     ).one()
+    parents = session.scalar(
+        select(func.count()).select_from(Issue).where(
+            Issue.team_id == team_id, ~leaf
+        )
+    ) or 0
     total = int(total or 0)
     open_count = int(open_count or 0)
     completion = round((total - open_count) / total * 100, 1) if total else 0.0
@@ -50,6 +56,7 @@ def stats(session: Session, team_id: int) -> dict:
         "done": int(done or 0),
         "high_open": int(high_open or 0),
         "overdue": int(overdue or 0),
+        "parents": int(parents),
         "completion": completion,
     }
 
@@ -106,7 +113,9 @@ def workload(session: Session, team_id: int) -> list[dict]:
         .join(TeamMember, TeamMember.user_id == User.id)
         .outerjoin(
             Issue,
-            (Issue.assignee_id == User.id) & (Issue.team_id == team_id),
+            (Issue.assignee_id == User.id)
+            & (Issue.team_id == team_id)
+            & hierarchy.leaf_condition(),
         )
         .where(TeamMember.team_id == team_id)
         .group_by(User.id, User.username, User.display_name, User.title)

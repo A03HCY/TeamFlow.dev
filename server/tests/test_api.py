@@ -42,7 +42,7 @@ def test_issue_lifecycle(client, team_slug, new_issue):
 
     listing = client.get(f"/api/teams/{team_slug}/issues", params={"state": "all"}).json()
     assert any(item["number"] == number for item in listing["issues"])
-    assert set(listing["counts"]) == {"total", "open", "closed"}
+    assert set(listing["counts"]) == {"total", "open", "closed", "parents"}
 
     patched = client.patch(
         f"/api/teams/{team_slug}/issues/{number}",

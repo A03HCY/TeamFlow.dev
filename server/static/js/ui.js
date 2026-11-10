@@ -193,14 +193,16 @@ export function issueRow(issue, options = {}) {
     `<span>更新于 ${esc(timeAgo(issue.updated_at || issue.created_at))}</span>`,
   ].filter(Boolean).join('');
 
-  return `<div class="issue-row" data-number="${esc(issue.number)}">
-    <span class="issue-row__lead${closed ? ' is-closed' : ''}"><gh-icon name="${closed ? 'issue-closed' : 'issue-opened'}" size="16"></gh-icon></span>
+  const isChild = !!issue.parent_id;
+  return `<div class="issue-row${isChild ? ' is-child' : ''}" data-number="${esc(issue.number)}">
+    <span class="issue-row__lead${closed ? ' is-closed' : ''}${isChild ? ' is-child' : ''}"><gh-icon name="${closed ? 'issue-closed' : (isChild ? 'git-branch' : 'issue-opened')}" size="16"></gh-icon></span>
     <div class="issue-row__main">
       <a class="issue-row__title" href="/${esc(slug)}/issues/${esc(issue.number)}">${esc(issue.title)}</a>
       <div class="issue-row__meta">${meta}</div>
       ${labels ? `<div class="issue-row__labels">${labels}</div>` : ''}
     </div>
     <div class="issue-row__side">
+      ${issue.estimate_hours ? `<span class="small muted mono">${esc(issue.estimate_hours)}h</span>` : ''}
       ${priorityBadge(issue.priority, true)}
       ${assignee ? avatarHTML(assignee, 22) : ''}
     </div>

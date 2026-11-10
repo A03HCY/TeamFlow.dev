@@ -32,6 +32,10 @@ function milestoneCard(milestone, slug) {
       <span class="mono small muted">#${esc(milestone.number)}</span>
     </div>
     ${milestone.description ? `<div class="ms-card__desc small muted">${esc(milestone.description)}</div>` : ''}
+    ${milestone.acceptance ? `<div class="ms-card__acceptance">
+      <div class="small muted row" style="gap:4px"><gh-icon name="tasklist" size="12"></gh-icon> 验收标准</div>
+      <div class="ms-card__acceptance-body" data-acceptance="${esc(milestone.number)}"></div>
+    </div>` : ''}
     <div class="row small muted">
       <span>${esc(dates)}</span>
       <span class="grow"></span>
@@ -54,6 +58,7 @@ export function openMilestoneDialog(milestone = null, onSaved = null) {
   const body = `
     ${fieldHTML({ label: '标题', name: 'title', placeholder: '例如：v2.0 发布', maxlength: 200 })}
     ${fieldHTML({ label: '描述', name: 'description', type: 'textarea', rows: 3, placeholder: '这个里程碑要达成什么？' })}
+    ${fieldHTML({ label: '验收标准', name: 'acceptance', type: 'textarea', rows: 4, placeholder: '- [ ] 支持邮箱登录\n- [ ] 补齐集成测试' , hint: '一行一条，验收标准会成为任务树提案的依据' })}
     <div class="form-grid">
       ${fieldHTML({ label: '类型', name: 'kind', type: 'select', options: KIND_OPTIONS, value: current.kind || 'scheduled' })}
       ${fieldHTML({ label: '状态', name: 'state', type: 'select', options: STATE_OPTIONS, value: current.state || 'open' })}
@@ -71,6 +76,8 @@ export function openMilestoneDialog(milestone = null, onSaved = null) {
       if (title) title.value = current.title || '';
       const desc = dialog.querySelector('[name="description"]');
       if (desc) desc.value = current.description || '';
+      const acceptance = dialog.querySelector('[name="acceptance"]');
+      if (acceptance) acceptance.value = current.acceptance || '';
       const start = dialog.querySelector('[name="start_date"]');
       if (start) start.value = current.start_date ? String(current.start_date).slice(0, 10) : '';
       const due = dialog.querySelector('[name="due_date"]');
@@ -82,6 +89,7 @@ export function openMilestoneDialog(milestone = null, onSaved = null) {
       const payload = {
         title,
         description: String(values.description || ''),
+        acceptance: String(values.acceptance || ''),
         kind: values.kind || 'scheduled',
         start_date: values.start_date ? String(values.start_date).slice(0, 10) : null,
         due_date: values.due_date ? String(values.due_date).slice(0, 10) : null,
@@ -131,6 +139,15 @@ export async function render(view, route) {
         <div class="ms-grid">${closed.map((milestone) => milestoneCard(milestone, slug)).join('')}</div>
       </gh-box>` : ''}
     ` : emptyHTML({ icon: 'milestone', title: '还没有里程碑', desc: canEdit ? '创建第一个里程碑来组织议题。' : '该团队还没有创建里程碑。' })}`;
+
+  view.querySelectorAll('[data-acceptance]').forEach((host) => {
+    const number = host.getAttribute('data-acceptance');
+    const milestone = milestones.find((item) => String(item.number) === String(number));
+    if (!milestone || !milestone.acceptance) return;
+    const md = document.createElement('gh-md');
+    md.textContent = milestone.acceptance;
+    host.append(md);
+  });
 
   onView(view, 'click', async (event) => {
     const act = event.target.closest('[data-act]');
