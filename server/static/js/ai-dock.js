@@ -1,6 +1,6 @@
 /* TeamFlow · 常驻 AI 对话框（挂到 body，路由切换不重建） */
 
-import { api } from './api.js';
+import { api, stream } from './api.js';
 import { esc, toast } from './ui.js';
 import { navigate } from './router.js';
 
@@ -115,6 +115,8 @@ function setOpen(open) {
     const input = root.querySelector('#ai-dock-input textarea');
     if (input) setTimeout(() => input.focus(), 60);
     syncMessages();
+    // 配置可能是在别的页面刚保存的，打开面板时重新确认一次
+    if (state.configured !== true) refreshStatus();
   }
 }
 
@@ -148,27 +150,62 @@ async function send(text) {
     return;
   }
   if (state.configured === false) {
-    toast('AI 还没有配置，请到「设置 → AI 助手」填写接口信息', 'err');
-    return;
+    // 配置可能刚在「设置」里保存过，重新确认一次再说
+    await refreshStatus();
+    if (state.configured === false) {
+      toast('AI 还没有配置，请到「设置 → AI 助手」填写接口信息', 'err');
+      return;
+    }
   }
   state.messages.push({ role: 'user', content });
-  saveMessages();
   state.busy = true;
+  state.error = '';
+  const index = state.messages.push({ role: 'assistant', content: '', streaming: true }) - 1;
   syncMessages();
+
+  let pending = '';
+  let timer = 0;
+  const flush = () => {
+    timer = 0;
+    state.messages[index].content = pending;
+    syncMessages();
+  };
+  const append = (piece) => {
+    pending += piece;
+    if (!timer) timer = setTimeout(flush, 60);
+  };
+
   try {
-    const data = await api.post(`/api/teams/${encodeURIComponent(state.slug)}/ai/chat`, {
-      messages: state.messages.slice(-MAX_TURNS),
-    });
-    state.messages.push({ role: 'assistant', content: String(data.reply || '') });
-    if (data.model) state.model = data.model;
+    await stream(
+      `/api/teams/${encodeURIComponent(state.slug)}/ai/chat/stream`,
+      { messages: state.messages.filter((item) => !item.streaming).slice(-MAX_TURNS) },
+      (event, payload) => {
+        if (event === 'delta') {
+          append(String((payload && payload.text) || ''));
+        } else if (event === 'done') {
+          pending = String((payload && payload.reply) || pending);
+          state.messages[index].content = pending;
+          state.messages[index].streaming = false;
+          if (payload && payload.model) state.model = payload.model;
+        } else if (event === 'error') {
+          throw new Error((payload && payload.message) || '生成中断');
+        }
+      },
+    );
+    if (!pending.trim()) {
+      state.messages[index] = { role: 'assistant', content: '（模型没有返回内容）', error: true };
+    }
   } catch (error) {
-    state.messages.push({
+    const message = error && error.message ? error.message : '未知错误';
+    state.messages[index] = {
       role: 'assistant',
-      content: `抱歉，这次没有拿到回复：${error && error.message ? error.message : '未知错误'}`,
+      content: pending ? `${pending}\n\n（生成中断：${message}）` : `抱歉，这次没有拿到回复：${message}`,
       error: true,
-    });
-    state.error = error && error.message ? error.message : '';
+    };
+    state.error = message;
   } finally {
+    if (timer) clearTimeout(timer);
+    if (state.messages[index]) state.messages[index].streaming = false;
     state.busy = false;
     saveMessages();
     syncMessages();

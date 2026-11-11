@@ -11,13 +11,17 @@ import { esc, avatarHTML, openDialog, toast, confirmAction } from './ui.js';
 export const NAV = [
   { view: 'ai', icon: 'sparkle', label: 'AI 助手' },
   { view: 'overview', icon: 'home', label: '概览' },
+  // 引擎紧跟概览：它是「今天产出了什么」的第一落点，放在最后一行没人往下翻
+  { view: 'engine', icon: 'rocket', label: '引擎' },
   { view: 'issues', icon: 'issue-opened', label: '议题' },
   { view: 'board', icon: 'project', label: '看板' },
-  { view: 'week', icon: 'calendar', label: '周计划' },
+  // 周计划与日程暂时隐藏：路由仍然可用（直接访问 /week、/schedule 能打开），
+  // 只是不在侧栏露出。要恢复就去掉 hidden，位置会保持原来的相对顺序。
+  { view: 'week', icon: 'calendar', label: '周计划', hidden: true },
   { view: 'milestones', icon: 'milestone', label: '里程碑' },
   { view: 'roadmap', icon: 'project-roadmap', label: '路线图' },
-  { view: 'schedule', icon: 'clock', label: '日程' },
-  { view: 'engine', icon: 'rocket', label: '引擎' },
+  { view: 'schedule', icon: 'clock', label: '日程', hidden: true },
+  { view: 'policy', icon: 'shield', label: '权限' },
   { view: 'settings', icon: 'gear', label: '设置' },
 ];
 
@@ -32,6 +36,7 @@ export const VIEW_TITLES = {
   roadmap: '路线图',
   schedule: '日程',
   engine: '推理引擎',
+  policy: '权限',
   settings: '设置',
 };
 
@@ -39,7 +44,7 @@ let bound = false;
 
 function navHTML() {
   const counts = (S.detail && S.detail.counts) || {};
-  return NAV.map((item) => {
+  return NAV.filter((item) => !item.hidden).map((item) => {
     const count = item.view === 'issues' && counts.open ? ` count="${esc(counts.open)}"` : '';
     return `<gh-nav-item key="${item.view}" data-view="${item.view}" icon="${item.icon}"${count}>${item.label}</gh-nav-item>`;
   }).join('');

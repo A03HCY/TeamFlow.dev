@@ -5,13 +5,59 @@ import { S, invalidateTeam } from '../store.js';
 import { navigate } from '../router.js';
 import {
   esc, avatarHTML, statusBadge, priorityBadge, stateBadge, labelChips, fmtDate,
-  fmtWeek, fmtDateTime, timeAgo, emptyHTML, toast, confirmAction, errorHTML,
-  onView,
+  fmtWeek, fmtDateTime, emptyHTML, toast, confirmAction, errorHTML, onView,
 } from '../ui.js';
 import { openIssueDialog, deleteIssue } from '../issue-form.js';
 
 function attrRow(label, html) {
   return `<div class="attr"><div class="attr__label">${esc(label)}</div><div class="attr__value">${html || '<span class="muted">—</span>'}</div></div>`;
+}
+
+/**
+ * 评论时间线：用 gh-timeline 的富内容卡片模式（与 GitHub 议题页一致）。
+ *
+ * 头像走 marker 插槽而不是 avatar 属性——库里多数人没上传头像，只用属性
+ * 时组件会退化成一个小圆点图标；走插槽可以复用头像组件的首字母占位，
+ * 而且列宽固定 32px，竖线不会因为「有头像/没头像」而错位。
+ *
+ * 正文用 gh-md 而不是 innerHTML：评论是用户输入，必须先当纯文本交给
+ * Markdown 渲染器，绝不能让原始 HTML 直接进 DOM。
+ */
+function commentTimeline(comments, issue) {
+  const timeline = document.createElement('gh-timeline');
+  comments.forEach((comment) => {
+    const item = document.createElement('gh-timeline-item');
+    item.setAttribute('card', '');
+
+    const marker = document.createElement('span');
+    marker.setAttribute('slot', 'marker');
+    // avatarHTML 认的是 display_name/username，评论对象上叫 author_name：
+    // 不转换的话没上传头像的人会显示成「?」
+    marker.innerHTML = avatarHTML(
+      { display_name: comment.author_name, avatar_url: comment.avatar_url }, 32,
+    );
+    item.append(marker);
+
+    const header = document.createElement('span');
+    header.setAttribute('slot', 'header');
+    header.innerHTML = `<strong>${esc(comment.author_name || '访客')}</strong> 评论于 <gh-time datetime="${esc(comment.created_at)}"></gh-time>`;
+    item.append(header);
+
+    if (comment.user_id && comment.user_id === issue.author_id) {
+      const badge = document.createElement('gh-label');
+      badge.setAttribute('slot', 'header-actions');
+      badge.setAttribute('color', '#0969da');
+      badge.textContent = '作者';
+      item.append(badge);
+    }
+
+    const body = document.createElement('gh-md');
+    body.textContent = comment.body || '';
+    item.append(body);
+
+    timeline.append(item);
+  });
+  return timeline;
 }
 
 export async function render(view, route) {
@@ -93,17 +139,7 @@ export async function render(view, route) {
         </gh-box>` : ''}
 
         <gh-box title="评论 (${comments.length})">
-          <div id="comment-list">
-            ${comments.length ? comments.map((comment) => `<div class="comment">
-              <div class="comment__head">
-                ${avatarHTML(comment, 22)}
-                <b>${esc(comment.author_name || '访客')}</b>
-                <span class="muted small">评论于 ${esc(fmtDateTime(comment.created_at))}</span>
-                ${comment.user_id ? `<span class="grow"></span><span class="small muted mono">@${esc(comment.username || '')}</span>` : ''}
-              </div>
-              <div class="comment__body" data-comment="${esc(comment.id)}"></div>
-            </div>`).join('') : emptyHTML({ icon: 'comment', title: '还没有评论', desc: '在下方写下第一条评论。' })}
-          </div>
+          <div id="comment-host"></div>
           ${canEdit ? `<div class="composer">
             <gh-textarea name="comment" rows="3" placeholder="${esc(S.user ? `以 ${S.user.display_name || S.user.username} 的身份评论…` : '以访客身份评论…')}"></gh-textarea>
             <div class="row" style="justify-content:flex-end">
@@ -146,13 +182,14 @@ export async function render(view, route) {
       bodyHost.innerHTML = '<p class="muted">暂无描述。</p>';
     }
   }
-  comments.forEach((comment) => {
-    const host = view.querySelector(`[data-comment="${comment.id}"]`);
-    if (!host) return;
-    const md = document.createElement('gh-md');
-    md.textContent = comment.body || '';
-    host.append(md);
-  });
+  const commentHost = view.querySelector('#comment-host');
+  if (commentHost) {
+    if (comments.length) {
+      commentHost.append(commentTimeline(comments, issue));
+    } else {
+      commentHost.innerHTML = emptyHTML({ icon: 'comment', title: '还没有评论', desc: '在下方写下第一条评论。' });
+    }
+  }
 
   const openEdit = () => openIssueDialog({
     slug,

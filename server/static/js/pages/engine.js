@@ -7,10 +7,30 @@ import {
   onView,
 } from '../ui.js';
 
+/* 自动同步：客户端上报是异步的（窗口结束 → 推断 → 洞察），
+ * 页面停在这一页时每 15 秒对一次指纹，有新东西才重绘，避免打断正在看的弹窗。 */
+let syncTimer = null;
+
+function stopSync() {
+  if (syncTimer) {
+    clearInterval(syncTimer);
+    syncTimer = null;
+  }
+}
+
+function syncKey(drafts, devices, events, pending, worker) {
+  return JSON.stringify({
+    drafts: drafts.map((item) => `${item.id}:${item.state}:${item.title}`),
+    devices: devices.map((item) => `${item.id}:${item.online}:${item.state}`),
+    events: events.length,
+    pending: Number(pending || 0),
+    done: Number((worker && worker.done) || 0),
+  });
+}
+
 const STATE_META = {
   online: { label: '在线', badge: 'open' },
-  offline: { label: '离线', badge: 'closed' },
-  pending: { label: '待接入', badge: 'warn' },
+  offline: { label: '离线', badge: 'closed' },  pending: { label: '待接入', badge: 'warn' },
   revoked: { label: '已吊销', badge: 'danger' },
 };
 
@@ -40,8 +60,15 @@ const OP_TEXT = {
 
 const PROPOSAL_KINDS = ['split', 'plan', 'criteria', 'assignment'];
 
+/* 判定「这张卡能不能应用」：看有没有可执行动作，而不是看 kind。
+ *
+ * 历史上的写法是 `kind !== 'progress'`，导致端侧进度洞察永远不显示「预览并应用」，
+ * 只能驳回——用户看到的就是「AI 不会改已有议题」。
+ */
 function isProposal(insight) {
-  return !!(insight && insight.kind && insight.kind !== 'progress');
+  const actions = (insight && insight.suggestion && insight.suggestion.actions) || [];
+  if (Array.isArray(actions) && actions.length) return true;
+  return !!(insight && insight.kind && PROPOSAL_KINDS.includes(insight.kind));
 }
 
 function kindBadge(kind) {
@@ -64,13 +91,30 @@ function actionList(insight) {
 
 function actionText(action) {
   if (!action) return '';
-  if (action.op === 'create_issue') return action.title || '';
+  if (action.op === 'create_issue') {
+    const where = action.milestone === 'new' ? '（挂本次新里程碑）'
+      : action.milestone ? `（里程碑 #${action.milestone}）` : '';
+    return `${action.title || ''}${where}`;
+  }
   if (action.op === 'update_issue' || action.op === 'close_issue') {
-    return action.issue ? `#${action.issue}${action.status ? ` → ${STATUS_TEXT[action.status] || action.status}` : ''}` : '';
+    if (!action.issue) return '';
+    const status = action.status ? ` → ${STATUS_TEXT[action.status] || action.status}` : '';
+    // 让「应用后会发生什么」在预览里就说清楚：改状态、覆写正文、留进度记录
+    const extra = [];
+    if (action.priority) extra.push(`优先级 ${action.priority}`);
+    if (action.body_append) extra.push('覆写正文');
+    if (action.comment) extra.push('追加进度记录');
+    return `#${action.issue}${status}${extra.length ? `（${extra.join('、')}）` : ''}`;
   }
   if (action.op === 'assign') return `${action.issue ? `#${action.issue} ` : ''}${action.assignee_name || action.assignee || ''}`;
   if (action.op === 'create_milestone') return action.title || '';
-  if (action.op === 'update_milestone') return action.milestone ? `#${action.milestone}` : '';
+  if (action.op === 'update_milestone') {
+    const bits = [];
+    if (action.state) bits.push(action.state === 'done' ? '标记完成' : '重新打开');
+    if (action.acceptance) bits.push('更新验收标准');
+    if (action.title) bits.push('改标题');
+    return `#${action.milestone}${bits.length ? `（${bits.join('、')}）` : ''}`;
+  }
   return '';
 }
 
@@ -89,8 +133,22 @@ function risksBlock(insight) {
   return parts.join('');
 }
 
+function recentlySeen(device, minutes = 10) {
+  // 客户端窗口走的是 REST 上报，没有 WS 长连接；十分钟内报过就算「在跑」
+  const seen = device && device.last_seen_at;
+  if (!seen) return false;
+  const stamp = Date.parse(String(seen).includes('T') ? seen : String(seen).replace(' ', 'T'));
+  if (Number.isNaN(stamp)) return false;
+  return Date.now() - stamp <= minutes * 60 * 1000;
+}
+
 function deviceRow(device, canManage, paused = false) {
-  const meta = paused ? { label: '已暂停', badge: 'warn' } : (STATE_META[device.state] || STATE_META.offline);
+  const restOnly = !device.online && device.state !== 'revoked' && recentlySeen(device);
+  const meta = paused
+    ? { label: '已暂停', badge: 'warn' }
+    : restOnly
+      ? { label: '上报中（REST）', badge: 'open' }
+      : (STATE_META[device.state] || STATE_META.offline);
   const pauseBtn = device.online
     ? paused
       ? `<gh-btn size="sm" variant="invisible" data-act="resume" data-id="${esc(device.id)}">
@@ -105,7 +163,12 @@ function deviceRow(device, canManage, paused = false) {
          title="点名让端侧回报指定文件">
          <gh-icon name="search" size="12"></gh-icon> 查文件
        </gh-btn>`
-    : '';
+    : canManage && restOnly
+      ? `<gh-btn size="sm" variant="invisible" disabled
+           title="这台客户端通过 REST 上报，实时点名需要 WS 长连接">
+           <gh-icon name="search" size="12"></gh-icon> 查文件
+         </gh-btn>`
+      : '';
   const actions = canManage && device.state !== 'revoked'
     ? `${queryBtn}${pauseBtn}
        <gh-btn size="sm" variant="invisible" data-act="revoke" data-id="${esc(device.id)}">
@@ -160,6 +223,13 @@ function insightCard(insight, slug, canEdit) {
           ? '<gh-badge state="closed" dot>已撤销</gh-badge>'
           : `<gh-badge state="open" dot>${esc(insight.state)}</gh-badge>`;
   const proposal = isProposal(insight);
+  // 准入结论：让用户看到这张卡是「凭什么」建出来的，而不是只有一个置信度数字
+  const admission = suggestion.admission || {};
+  const admissionLine = admission.reason
+    ? `<div class="small muted">准入：${esc(admission.reason)}<span class="muted">（${
+        admission.source === 'model' ? '模型判断' : '规则'
+      }）</span></div>`
+    : '';
   const applyBtn = proposal && insight.state === 'draft' && canEdit
     ? `<gh-btn size="sm" variant="primary" data-act="apply" data-id="${esc(insight.id)}"><gh-icon name="check" size="12"></gh-icon> 预览并应用</gh-btn>`
     : '';
@@ -175,6 +245,7 @@ function insightCard(insight, slug, canEdit) {
       ${stateBadge}
     </div>
     <div class="insight-card__summary">${esc(insight.summary || '')}</div>
+    ${admissionLine}
     ${proposal ? actionList(insight) : ''}
     <div class="insight-card__refs">${evidenceChips(insight.evidence)}</div>
     ${risksBlock(insight)}
@@ -205,25 +276,55 @@ function auditRow(entry) {
 export function openPairDialog(slug, onDone = null) {
   return openDialog({
     title: '生成配对码',
-    body: `<div class="dlg-note">生成后把配对码填到端侧 SDK 的配置里，设备第一次连上就自动激活。
-      配对码只在这次显示，过期时间 60 分钟。</div>
-      ${fieldHTML({ label: '设备名称（可留空）', name: 'name', placeholder: '例如：林薇的 MacBook', maxlength: 120 })}`,
+    body: `<div class="dlg-note">把配对码给对方，在客户端选「用配对码接入」。
+      兑换时会按对方电脑用户名自动建一个团队成员，日志与洞察都挂在这个人名下。
+      配对码只显示这一次，30 分钟内有效，用过即作废。</div>
+      <div class="dlg-note">如果对方用网页同一账号登录客户端，则不需要配对码，直接「账号登录」即可绑定。</div>`,
     okText: '生成',
     cancelText: '取消',
     onSubmit: async (values, dialog) => {
       try {
-        const data = await api.post(`/api/teams/${encodeURIComponent(slug)}/engine/edge/pair`, {
-          name: String(values.name || '').trim(),
-          platform: '',
-        });
+        const data = await api.post(`/api/teams/${encodeURIComponent(slug)}/engine/pair-code`, {});
         dialog.close();
-        openTokenDialog(data, onDone);
+        openPairCodeDialog(data, onDone);
       } catch (error) {
         toast(error.message || '生成失败', 'err');
         return false;
       }
       return true;
     },
+  });
+}
+
+export function openPairCodeDialog(data, onDone = null) {
+  const code = data.code || '';
+  const wsPath = `${location.origin.replace(/^http/, 'ws')}${data.ws_path || '/api/edge/ws'}`;
+  openDialog({
+    title: '配对码已生成',
+    body: `<div class="dlg-note">只显示这一次，请发给对方。有效期 ${esc(String(data.expires_in_minutes || 30))} 分钟。</div>
+      <gh-field label="配对码"><gh-input value="${esc(code)}" readonly></gh-input></gh-field>
+      <gh-field label="服务端地址"><gh-input value="${esc(location.origin)}" readonly></gh-input></gh-field>
+      <gh-field label="客户端怎么填"><gh-textarea rows="4" readonly value="${esc(`服务器地址：${location.origin}\n配对码：${code}\n电脑用户名：默认取本机用户名，可改`)}"></gh-textarea></gh-field>`,
+    okText: '完成',
+    cancelText: '',
+    onMount: (dialog) => {
+      const copy = document.createElement('gh-btn');
+      copy.setAttribute('size', 'sm');
+      copy.setAttribute('data-act', 'copy-code');
+      copy.innerHTML = '<gh-icon name="copy" size="12"></gh-icon> 复制配对码';
+      dialog.addEventListener('click', async (event) => {
+        if (!event.target.closest('[data-act="copy-code"]')) return;
+        try {
+          await navigator.clipboard.writeText(code);
+          toast('配对码已复制');
+        } catch {
+          toast('复制失败，请手动选择配对码', 'err');
+        }
+      });
+      const actions = dialog.querySelector('.dlg-actions') || dialog;
+      actions.insertBefore(copy, actions.firstChild);
+    },
+    onClose: () => { if (typeof onDone === 'function') onDone(); },
   });
 }
 
@@ -443,7 +544,7 @@ export async function render(view, route) {
 
   const canManage = !!overview.can_manage || S.canEdit;
   const devices = Array.isArray(overview.devices) ? overview.devices : [];
-  const online = devices.filter((item) => item.online).length;
+  const online = devices.filter((item) => item.online || recentlySeen(item)).length;
   const events = Array.isArray(overview.events) ? overview.events : [];
   const jobs = Array.isArray(overview.jobs) ? overview.jobs : [];
   const drafts = Array.isArray(insights.insights) ? insights.insights : [];
@@ -453,6 +554,22 @@ export async function render(view, route) {
   const worker = overview.worker || {};
   const pausedIds = new Set((overview.paused || []).map((id) => String(id)));
   const queued = jobs.filter((job) => job.status === 'queued' || job.status === 'running').length;
+  // 准入记录：不建卡也要让人看见「系统分析过了，为什么判定不值得」。
+  // 否则用户看到的只有「洞察列表空的」，会以为引擎根本没工作。
+  const VERDICT_TEXT = { create: '建议新议题', merge: '记入议题', skip: '不建卡' };
+  const judged = jobs
+    .map((job) => {
+      const budget = job.budget && typeof job.budget === 'object' ? job.budget : {};
+      return { job, admission: budget.admission || null };
+    })
+    .filter((item) => item.admission && item.admission.reason)
+    .slice(0, 6);
+  const judgedRows = judged.map(({ job, admission }) => `<tr>
+      <td><gh-badge state="${admission.verdict === 'skip' ? 'closed' : 'open'}" dot>${esc(VERDICT_TEXT[admission.verdict] || admission.verdict)}</gh-badge></td>
+      <td class="small">${esc(admission.reason)}</td>
+      <td class="small muted">${esc(admission.source === 'model' ? '模型' : '规则')}</td>
+      <td class="small muted">${esc(timeAgo(job.finished_at || job.created_at))}</td>
+    </tr>`).join('');
 
   const deviceRows = devices.length
     ? devices.map((device) => deviceRow(device, canManage, pausedIds.has(String(device.id)))).join('')
@@ -476,6 +593,7 @@ export async function render(view, route) {
     <gh-alert type="note">
       引擎${worker.running ? '正在后台运行' : '已按配置关闭后台循环'}：已处理 ${esc(worker.done || 0)} 个作业，产生 ${esc(worker.insights || 0)} 条洞察。
       端侧只上报脱敏后的文件元信息（路径 / 增删行数 / 是否涉及测试），不传代码内容。
+      本页每 15 秒自动同步一次，不需要手动刷新。
     </gh-alert>
     <div class="grid-stats">
       <gh-stat label="在线设备" value="${esc(online)}" unit="/ ${esc(devices.length)}" icon="desktop-download"></gh-stat>
@@ -487,6 +605,12 @@ export async function render(view, route) {
       ${drafts.length ? drafts.map((insight) => insightCard(insight, slug, canManage)).join('')
         : emptyHTML({ icon: 'sparkle', title: '暂无待确认的洞察', desc: '端侧上报代码变更后，引擎会自动推断进度；也可以点右上角「生成提案」按议题或里程碑生成拆分/任务树草稿。' })}
     </gh-box>
+    ${judgedRows ? `<gh-box title="最近判断（为什么有或没有洞察）">
+      <gh-table dense><table><thead><tr>
+        <th>结论</th><th>理由</th><th>判断者</th><th>时间</th>
+      </tr></thead><tbody>${judgedRows}</tbody></table></gh-table>
+      <div class="small muted" style="margin-top:8px">“不建卡”不是没分析，而是判定这次改动不值得占一张洞察卡片。</div>
+    </gh-box>` : ''}
     ${recent.length ? `<gh-box title="最近已应用（5 分钟内可撤销）">
       ${recent.map((insight) => insightCard(insight, slug, canManage)).join('')}
     </gh-box>` : ''}
@@ -512,6 +636,34 @@ export async function render(view, route) {
         <th>事件</th><th>类型</th><th>规模</th><th>时间</th>
       </tr></thead><tbody>${eventRows}</tbody></table></gh-table>
     </gh-box>` : ''}`;
+
+  /* 自动同步：端侧上报 → 推断 → 洞察是异步的，停在引擎页也能自己刷新出来 */
+  stopSync();
+  if (!document.body.querySelector('gh-dialog')) {
+    const key = syncKey(drafts, devices, events, pendingJobs, worker);
+    syncTimer = setInterval(async () => {
+      if (!view.isConnected) { stopSync(); return; }
+      if (document.visibilityState === 'hidden') return;
+      if (document.body.querySelector('gh-dialog')) return;   // 有弹窗时不打扰
+      try {
+        const [nextOverview, nextDrafts] = await Promise.all([
+          api.get(`/api/teams/${encodeURIComponent(slug)}/engine/edge`),
+          api.get(`/api/teams/${encodeURIComponent(slug)}/engine/insights`, { state: 'draft' }),
+        ]);
+        const nextKey = syncKey(
+          nextDrafts.insights || [], nextOverview.devices || [], nextOverview.events || [],
+          nextOverview.pending_jobs || 0, nextOverview.worker || {},
+        );
+        if (nextKey === key) return;
+        stopSync();
+        const top = window.scrollY;
+        await render(view, route);
+        window.scrollTo(0, top);
+      } catch (error) {
+        /* 自动同步失败不打扰用户，下一轮再试 */
+      }
+    }, 15000);
+  }
 
   onView(view, 'click', async (event) => {
     const act = event.target.closest('[data-act]');

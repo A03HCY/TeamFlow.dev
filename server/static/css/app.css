@@ -200,13 +200,15 @@ p { margin: 0; }
 .attr { display: flex; flex-direction: column; gap: 4px; }
 .attr__label { font-size: 12px; font-weight: 600; color: var(--gh-fg-muted); }
 .attr__value { font-size: 13px; }
-.comment { display: flex; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--gh-border-muted); }
-.comment:last-child { border-bottom: 0; }
-.comment__main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
-.comment__head { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: var(--gh-fg-muted); }
-.comment__author { font-weight: 600; color: var(--gh-fg); font-size: 13px; }
-.comment__body { font-size: 13px; }
-.composer { display: flex; flex-direction: column; gap: 10px; }
+/* 议题评论：gh-timeline 卡片模式（32px 头像列 + 竖线 + gh-md 富内容）。
+   组件自带卡片边框与间距，这里只处理它与外层 gh-box、评论框的衔接。 */
+#comment-host > gh-timeline { display: block; }
+#comment-host .gh-timeline__item:last-child { padding-bottom: 0; }
+#comment-host .gh-timeline__header-main strong { color: var(--gh-fg); }
+.composer {
+  display: flex; flex-direction: column; gap: 10px;
+  margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--gh-border-muted);
+}
 .chip-pick { display: flex; flex-wrap: wrap; gap: 6px 14px; }
 .chip-color { width: 14px; height: 14px; border-radius: 50%; display: inline-block; border: 1px solid var(--gh-border); }
 
@@ -350,6 +352,21 @@ p { margin: 0; }
 .ai-dock__body {
   flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px;
 }
+.ai-dock__body::-webkit-scrollbar,
+.ai-thread__list::-webkit-scrollbar { width: 8px; height: 8px; }
+.ai-dock__body::-webkit-scrollbar-track,
+.ai-thread__list::-webkit-scrollbar-track { background: transparent; }
+.ai-dock__body::-webkit-scrollbar-thumb,
+.ai-thread__list::-webkit-scrollbar-thumb {
+  background: var(--gh-border); border-radius: 999px;
+  border: 2px solid transparent; background-clip: content-box;
+}
+.ai-dock__body::-webkit-scrollbar-thumb:hover,
+.ai-thread__list::-webkit-scrollbar-thumb:hover {
+  background: var(--gh-fg-muted); background-clip: content-box;
+}
+.ai-dock__body, .ai-thread__list { scrollbar-width: thin; scrollbar-color: var(--gh-border) transparent; }
+
 .ai-msg { display: flex; gap: 8px; }
 .ai-msg--user { justify-content: flex-end; }
 .ai-msg__avatar {

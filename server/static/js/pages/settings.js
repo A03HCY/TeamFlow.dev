@@ -270,14 +270,21 @@ export async function render(view, route) {
     api.get('/api/ai/config').then((config) => {
       if (!host) return;
       host.innerHTML = `
-        ${fieldHTML({ label: '接口地址', name: 'ai_base_url', value: config.base_url || '', placeholder: 'https://api.example.com/v1' })}
-        ${fieldHTML({ label: '模型', name: 'ai_model', value: config.model || '', placeholder: 'deepseek-chat' })}
+        <div class="row" style="gap:6px;align-items:center">
+          <span class="small muted">常用服务</span>
+          <gh-btn size="sm" variant="invisible" data-act="preset-deepseek">DeepSeek</gh-btn>
+          <span class="small muted">点一下自动填地址与模型，再粘 Key</span>
+        </div>
+        ${fieldHTML({ label: '接口地址', name: 'ai_base_url', value: config.base_url || '', placeholder: 'https://api.deepseek.com' })}
+        ${fieldHTML({ label: '模型', name: 'ai_model', value: config.model || '', placeholder: 'deepseek-flash' })}
         ${fieldHTML({ label: 'API Key', name: 'ai_api_key', type: 'password', placeholder: config.api_key_masked || '未配置' })}
         <div class="row">
           <gh-badge state="${config.configured ? 'closed' : 'open'}">${config.configured ? '已配置' : '未配置'}</gh-badge>
           <span class="grow"></span>
-          <gh-btn size="sm" data-act="save-ai">保存</gh-btn>
-        </div>`;
+          <gh-btn size="sm" data-act="test-ai">测试连接</gh-btn>
+          <gh-btn size="sm" variant="primary" data-act="save-ai">保存</gh-btn>
+        </div>
+        <div id="ai-test-result" class="small muted"></div>`;
     }).catch((error) => {
       if (host) host.innerHTML = `<div class="small muted">${esc(error.message || '无法读取 AI 配置')}</div>`;
     });
@@ -376,6 +383,42 @@ export async function render(view, route) {
         S.editLocked = false;
         toast('已解锁');
         refresh();
+        return;
+      }
+      if (name === 'preset-deepseek') {
+        const set = (key, v) => {
+          const node = view.querySelector(`#ai-config [name="${key}"]`);
+          if (node) node.value = v;
+        };
+        set('ai_base_url', 'https://api.deepseek.com');
+        set('ai_model', 'deepseek-flash');
+        const result = view.querySelector('#ai-test-result');
+        if (result) result.textContent = '已填入 DeepSeek 地址与模型，接着粘贴 API Key，然后点「测试连接」。';
+        return;
+      }
+      if (name === 'test-ai') {
+        const value = (key) => {
+          const node = view.querySelector(`#ai-config [name="${key}"]`);
+          return node ? String(node.value || '').trim() : '';
+        };
+        const result = view.querySelector('#ai-test-result');
+        if (result) result.textContent = '正在请求模型…';
+        act.setAttribute('disabled', '');
+        try {
+          const r = await api.post('/api/ai/config/test', {
+            base_url: value('ai_base_url'),
+            model: value('ai_model'),
+            api_key: value('ai_api_key'),
+          });
+          if (result) {
+            result.textContent = `连接成功：模型 ${r.model} 回复「${r.reply || '（空）'}」，端点 ${r.endpoint}`;
+          }
+          toast('AI 配置可用');
+        } catch (error) {
+          if (result) result.textContent = `连接失败：${error.message || '未知错误'}`;
+        } finally {
+          act.removeAttribute('disabled');
+        }
         return;
       }
       if (name === 'save-ai') {

@@ -68,7 +68,59 @@ async function send(path, options = {}) {
 export const api = {
   get: (path, params) => send(path + toQuery(params)),
   post: (path, body) => send(path, { method: 'POST', body }),
+  put: (path, body) => send(path, { method: 'PUT', body }),
   patch: (path, body) => send(path, { method: 'PATCH', body }),
   del: (path) => send(path, { method: 'DELETE' }),
   upload: (path, form) => send(path, { method: 'POST', form }),
 };
+
+/** 以 SSE 方式读取接口：``onEvent(event, payload)`` 逐块回调，直到流结束。 */
+export async function stream(path, body, onEvent) {
+  const headers = { 'Content-Type': 'application/json' };
+  const actor = actorSource();
+  if (actor) headers['X-Actor-Id'] = String(actor);
+  let res;
+  try {
+    res = await fetch(path, {
+      method: 'POST', headers, body: JSON.stringify(body),
+      credentials: 'same-origin', cache: 'no-store',
+    });
+  } catch {
+    throw new ApiError('无法连接服务器，请确认服务正在运行', 0, 'network');
+  }
+  if (!res.ok) {
+    let data = null;
+    try { data = await res.json(); } catch { data = null; }
+    const code = (data && data.code) || '';
+    const message = (data && (data.error || data.detail)) || `请求失败（HTTP ${res.status}）`;
+    if (res.status === 401 && unauthorizedHandler) unauthorizedHandler(message);
+    throw new ApiError(String(message), res.status, code);
+  }
+  if (!res.body) throw new ApiError('当前环境不支持流式读取', 0, 'stream');
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let cut = buffer.indexOf('\n\n');
+    while (cut >= 0) {
+      const block = buffer.slice(0, cut);
+      buffer = buffer.slice(cut + 2);
+      let event = 'message';
+      let data = '';
+      block.split('\n').forEach((line) => {
+        if (line.startsWith('event:')) event = line.slice(6).trim();
+        else if (line.startsWith('data:')) data += line.slice(5).trim();
+      });
+      if (data) {
+        let payload = null;
+        try { payload = JSON.parse(data); } catch { payload = { text: data }; }
+        onEvent(event, payload);
+      }
+      cut = buffer.indexOf('\n\n');
+    }
+  }
+}

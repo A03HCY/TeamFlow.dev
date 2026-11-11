@@ -23,9 +23,10 @@ import * as schedule from './pages/schedule.js';
 import * as engine from './pages/engine.js';
 import * as settings from './pages/settings.js';
 import * as projectNew from './pages/project-new.js';
+import * as policy from './pages/policy.js';
 
 const PAGES = {
-  ai, overview, issues, issue, board, week, milestones, roadmap, schedule, engine, settings,
+  ai, overview, issues, issue, board, week, milestones, roadmap, schedule, engine, policy, settings,
 };
 
 function fatalHTML(message, hint = '') {
@@ -69,6 +70,8 @@ async function onRoute(route) {
   if (route.kind === 'teams') { auth.renderTeams(app); return; }
 
   if (route.kind === 'home') {
+    // 开了登录模式且没有会话：直接去登录页，别停在「还没有团队」的空状态
+    if (S.requireLogin && !S.user) { navigate('/login', { replace: true }); return; }
     const team = pickDefaultTeam();
     if (team) { navigate(`/${team.slug}/overview`, { replace: true }); return; }
     auth.renderNoTeam(app);

@@ -230,8 +230,22 @@ export function errorHTML(message, hint = '') {
 
 /* ---------------- 提示 / 确认 / 弹层 ---------------- */
 
+// 同一条提示连续触发时不该在屏幕右侧叠成一列（连点按钮就会堆出十几条）。
+// 3 秒内重复的同文案直接忽略，新的文案照常弹。
+const TOAST_DEDUPE_MS = 3000;
+const toastRecent = new Map();
+
 export function toast(message, kind = 'ok') {
-  if (window.GHUI && typeof GHUI.toast === 'function') GHUI.toast(String(message), kind === 'err' ? 'err' : 'ok');
+  const text = String(message);
+  const now = Date.now();
+  if (now - (toastRecent.get(text) || 0) < TOAST_DEDUPE_MS) return;
+  toastRecent.set(text, now);
+  if (toastRecent.size > 40) {
+    for (const [key, at] of toastRecent) {
+      if (now - at >= TOAST_DEDUPE_MS) toastRecent.delete(key);
+    }
+  }
+  if (window.GHUI && typeof GHUI.toast === 'function') GHUI.toast(text, kind === 'err' ? 'err' : 'ok');
   else if (kind === 'err') console.error(message);
   else console.info(message);
 }
@@ -295,9 +309,26 @@ export function openDialog(options = {}) {
 
 const FIELD_SELECTOR = 'input[name], textarea[name], select[name], gh-input[name], gh-textarea[name], gh-select[name], gh-checkbox[name], gh-radio[name], gh-switch[name], gh-combobox[name], gh-tag-input[name], gh-segmented[name], gh-range[name]';
 
+const NATIVE_FIELD_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT']);
+
 function fieldElements(root) {
   const all = Array.from(root.querySelectorAll(FIELD_SELECTOR));
-  return all.filter((el) => !all.some((other) => other !== el && other.contains(el)));
+  // gh-input / gh-textarea / gh-select 的外壳里包着一个原生控件，外壳自己的 .value 不会跟着
+  // 用户输入变化。同一 name 同时存在外壳与原生控件时，一律取原生那个，否则读到的永远是空。
+  const kept = all.filter((el) => {
+    if (NATIVE_FIELD_TAGS.has(el.tagName)) return true;
+    const inner = el.querySelector('input, textarea, select');
+    return !(inner && inner.getAttribute('name') === el.getAttribute('name'));
+  });
+  return kept.filter((el) => !kept.some((other) => other !== el && other.contains(el)));
+}
+
+/** 兜底：外壳没有把 value 代理出来时，去它的子树里找原生控件的值。 */
+function componentValue(el) {
+  const outer = el.value;
+  if (outer !== undefined && outer !== null && String(outer) !== '') return outer;
+  const inner = el.querySelector('input, textarea, select');
+  return inner ? inner.value : (outer === undefined || outer === null ? '' : outer);
 }
 
 export function readValues(root) {
@@ -333,6 +364,10 @@ export function readValues(root) {
     if (tag === 'GH-SWITCH') {
       const input = el.querySelector('input');
       push(name, input ? input.checked : el.hasAttribute('checked'));
+      return;
+    }
+    if (tag === 'GH-INPUT' || tag === 'GH-TEXTAREA' || tag === 'GH-COMBOBOX') {
+      push(name, componentValue(el));
       return;
     }
     push(name, el.value);
