@@ -42,6 +42,7 @@ ENV_MAP = {
     "TEAMFLOW_EDGE_SERVER_URL": "url",
     "TEAMFLOW_EDGE_TOKEN": "token",
     "TEAMFLOW_EDGE_TEAM": "team",
+    "TEAMFLOW_EDGE_USER": "username",
     "TEAMFLOW_EDGE_DEVICE_NAME": "device_name",
     "TEAMFLOW_EDGE_DEVICE": "device_name",
     "TEAMFLOW_EDGE_PLATFORM": "platform",
@@ -65,6 +66,7 @@ class EdgeConfig:
     url: str = ""
     token: str = ""
     team: str = ""
+    username: str = ""
     device_name: str = ""
     platform: str = ""
     agent_version: str = ""

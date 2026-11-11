@@ -33,6 +33,7 @@ from .core.network import (
     sha256_file,
 )
 from .core.query import QuerySandbox
+from .core.watcher import FolderWatcher, WindowReport, current_branch, path_hash
 
 
 # ------------------------------------------------------------------ status
@@ -223,6 +224,120 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0 if not stats.get("fatal") else 1
 
 
+def cmd_watch(args: argparse.Namespace) -> int:
+    """无人操作窗口探针：捕捉文件夹变动 → 生成日志 → 上报（可选触发推断）。"""
+    cfg = load_config(args.config)
+    try:
+        cfg.ensure_ready()
+    except ConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    rest = fallback_from_config(cfg)
+    if rest is None:
+        print("缺少 url / token，先执行 set 命令完成配对", file=sys.stderr)
+        return 2
+
+    # 账号与团队匹配：用设备令牌换策略，顺带把团队 slug 补进本地配置
+    policy = {"idle_minutes": 3, "allow_view": False}
+    try:
+        info = rest.fetch_policy()
+        policy = info.get("policy") or policy
+        team_slug = str(info.get("team") or "")
+        if team_slug and not cfg.team:
+            cfg.team = team_slug
+            save_config(cfg, args.config)
+            print(f"已根据配对信息补全团队：{team_slug}")
+        print(f"已匹配团队：{info.get('team_name') or team_slug}　设备：{(info.get('device') or {}).get('name', '')}")
+    except EdgeApiError as exc:
+        print(f"策略拉取失败，按默认值继续：{exc}", file=sys.stderr)
+
+    idle = int(args.idle_minutes or policy.get("idle_minutes") or 3)
+    allow_view = bool(policy.get("allow_view"))
+
+    watcher = FolderWatcher(
+        args.root,
+        idle_minutes=idle,
+        interval=args.interval,
+    )
+    root = Path(args.root).expanduser().resolve()
+    label = args.label or root.name
+    branch = args.branch or current_branch(root)
+    repo = {"label": label, "path_hash": path_hash(root), "branch": branch}
+
+    mode = "可见（显示变动内容与进度）" if allow_view else "静默（只上传，不展示内容）"
+    print(f"开始监听：{root}")
+    print(f"窗口：{idle} 分钟无操作后上报；模式：{mode}")
+    print("按 Ctrl+C 退出\n")
+
+    def on_window(report: "WindowReport") -> None:
+        nonlocal idle
+        # 每轮都重新拉一次策略：管理员在网页改了间隔，下一轮即生效
+        try:
+            latest = rest.fetch_policy().get("policy") or {}
+            if latest.get("idle_minutes"):
+                idle = int(latest["idle_minutes"])
+                watcher.idle_minutes = idle
+            if args.idle_minutes:
+                watcher.idle_minutes = int(args.idle_minutes)
+        except EdgeApiError:
+            pass
+
+        payload = report.log_payload(repo=label, branch=branch)
+        if not allow_view:
+            # 静默模式：只上报统计量，日志里不带具体文件路径
+            payload["summary"] = (
+                f"{report.idle_minutes} 分钟无操作，{report.file_count} 个文件改动"
+                f"（+{report.additions} / -{report.deletions} 行）"
+            )
+            payload["files"] = []
+        envelope = build_event(
+            event_uid=new_event_uid(),
+            repo=repo,
+            files=report.event_files() if allow_view else [],
+            # 统计量与符号摘要任何模式都上行，否则服务端只能看到「0 个文件」
+            stats={
+                "files": report.file_count,
+                "added": report.additions,
+                "removed": report.deletions,
+            },
+            digest=report.symbol_digest(),
+            kind="snapshot",
+            notes=payload["summary"][:500],
+            trigger="idle-window",
+        )
+        try:
+            result = rest.post_log(payload, envelope)
+        except EdgeApiError as exc:
+            print(f"[上报失败] {exc}", file=sys.stderr)
+            return
+
+        stamp = time.strftime("%H:%M:%S")
+        if allow_view:
+            print(f"[{stamp}] {payload['summary']}")
+        else:
+            print(f"[{stamp}] 已静默上报：{report.file_count} 个文件，+{report.additions}/-{report.deletions} 行")
+        event = result.get("event") or {}
+        if event:
+            print(f"          日志 #{result.get('log_id')} · 事件 #{event.get('event_id')} · 作业 #{event.get('job_id')} · 议题 #{event.get('issue_number')}")
+
+    try:
+        watcher.run(on_window)
+    except KeyboardInterrupt:
+        print("\n已停止监听")
+    return 0
+
+
+def cmd_ui(args: argparse.Namespace) -> int:
+    """打开桌面客户端窗口（pywebview）：状态、策略与手动控制都在窗口里。"""
+    try:
+        from .gui import run as run_ui
+    except ImportError:
+        print("需要先安装：pip install pywebview", file=sys.stderr)
+        return 2
+    return run_ui(args.config, args.root, args.interval)
+
+
 def cmd_clear(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     target = Path(cfg.spool_path())
@@ -297,6 +412,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     clearer = sub.add_parser("clear", help="把离线队列移到备份文件")
     clearer.set_defaults(func=cmd_clear)
+
+    watcher = sub.add_parser("watch", help="监听文件夹：无操作一段时间后生成日志并上报")
+    watcher.add_argument("--root", required=True, help="要监听的文件夹")
+    watcher.add_argument("--idle-minutes", dest="idle_minutes", type=int,
+                         help="覆盖服务端下发的间隔时长（默认用权限页配置）")
+    watcher.add_argument("--interval", type=float, default=5.0, help="扫描间隔秒数（默认 5）")
+    watcher.add_argument("--label", help="仓库显示名（默认取文件夹名）")
+    watcher.add_argument("--branch", help="分支名（默认读 .git/HEAD）")
+    watcher.set_defaults(func=cmd_watch)
+
+    gui = sub.add_parser("ui", help="打开客户端窗口（pywebview）")
+    gui.add_argument("--root", help="要监听的文件夹（默认当前目录）")
+    gui.add_argument("--interval", type=float, default=5.0, help="扫描间隔秒数（默认 5）")
+    gui.set_defaults(func=cmd_ui)
 
     return parser
 

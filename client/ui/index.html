@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-gh-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="color-scheme" content="light">
+<title>TeamFlow 客户端</title>
+<link rel="stylesheet" href="vendor/gh-ui.css">
+<style>
+  :root { color-scheme: light; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: #f6f8fa;
+    color: var(--gh-fg-default, #1f2328);
+  }
+  .app { display: flex; flex-direction: column; min-height: 100vh; }
+  .hd {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 18px; background: #fff; border-bottom: 1px solid #d0d7de;
+  }
+  .hd__mark {
+    width: 26px; height: 26px; border-radius: 6px; background: #0969da;
+    display: flex; align-items: center; justify-content: center; color: #fff; font-size: 14px;
+  }
+  .hd__title { font-size: 15px; font-weight: 600; }
+  .hd__meta { font-size: 12px; color: #57606a; display: flex; gap: 10px; align-items: center; }
+  .hd__spacer { flex: 1; }
+  .hd__user {
+    display: flex; align-items: center; gap: 8px;
+    padding-left: 12px; margin-left: 4px; border-left: 1px solid #eaeef2;
+    font-size: 12px; color: #57606a;
+  }
+  .hd__user b { color: #1f2328; font-weight: 600; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #8c959f; display: inline-block; }
+  .dot.on { background: #1a7f37; }
+  .dot.err { background: #cf222e; }
+
+  main { padding: 14px 18px 20px; display: flex; flex-direction: column; gap: 12px; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .stat {
+    background: #fff; border: 1px solid #d0d7de; border-radius: 6px; padding: 10px 12px;
+  }
+  .stat__k { font-size: 11px; color: #57606a; letter-spacing: .02em; }
+  .stat__v { font-size: 14px; font-weight: 600; margin-top: 4px; word-break: break-all; }
+  .stat__v.small { font-size: 12px; font-weight: 500; }
+  .acts { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .hint { font-size: 12px; color: #57606a; margin-left: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid #eaeef2; }
+  th { color: #57606a; font-weight: 600; font-size: 11.5px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+  .empty { padding: 26px 0; text-align: center; color: #8c959f; font-size: 12.5px; }
+  footer {
+    margin-top: auto; padding: 10px 18px; border-top: 1px solid #d0d7de;
+    background: #fff; font-size: 11.5px; color: #57606a;
+    display: flex; gap: 14px; align-items: center;
+  }
+  .analysis { font-size: 12.5px; line-height: 1.75; color: #1f2328; white-space: pre-wrap; }
+  .analysis.empty-state { color: #8c959f; }
+
+  .err {
+    background: #fff5f5; border: 1px solid #ffcecb; color: #82071e;
+    border-radius: 6px; padding: 8px 10px; font-size: 12px;
+  }
+
+  /* 登录页 ------------------------------------------------------------- */
+  .login {
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: #f6f8fa; padding: 28px 20px; box-sizing: border-box;
+  }
+  .login__card {
+    width: 420px; max-width: 100%; background: #fff; border: 1px solid #d0d7de;
+    border-radius: 10px; padding: 26px 26px 20px; box-shadow: 0 1px 3px rgba(31, 35, 40, .06);
+  }
+  .login__head { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
+  .login__mark {
+    width: 34px; height: 34px; border-radius: 8px; background: #0969da; color: #fff;
+    display: flex; align-items: center; justify-content: center; font-size: 17px; flex: none;
+  }
+  .login__title { font-size: 17px; font-weight: 600; }
+  .login__sub { font-size: 12px; color: #57606a; margin-top: 3px; }
+  .login__tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+  .login__msg { font-size: 12px; margin-top: 10px; min-height: 18px; color: #57606a; word-break: break-all; }
+  .login__msg.bad { color: #cf222e; }
+  .login__msg.good { color: #1a7f37; }
+  .login__note {
+    font-size: 11.5px; color: #8c959f; line-height: 1.6; margin: 12px 0 0;
+    padding-top: 12px; border-top: 1px solid #eaeef2;
+  }
+  .login__submit { width: 100%; margin-top: 6px; }
+  .pick__label { font-size: 12px; color: #57606a; margin: 10px 0 8px; }
+  .pick__list { display: flex; flex-wrap: wrap; gap: 8px; }
+  .pick__item {
+    border: 1px solid #d0d7de; background: #f6f8fa; border-radius: 6px;
+    padding: 7px 12px; font-size: 13px; cursor: pointer; color: #1f2328;
+  }
+  .pick__item:hover { background: #eaeef2; border-color: #afb8c1; }
+  .pick__item b { font-weight: 600; }
+  .team-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    border: 1px solid #d0d7de; background: #f6f8fa; border-radius: 999px;
+    padding: 1px 8px; font-size: 12px; color: #1f2328; font-weight: 600;
+  }
+</style>
+</head>
+<body>
+
+<!-- 登录页：未登录 / 令牌失效 / 退出登录后都停在这里 -->
+<div id="loginView" class="login">
+  <div class="login__card">
+    <div class="login__head">
+      <div class="login__mark">◈</div>
+      <div>
+        <div class="login__title">TeamFlow 客户端</div>
+        <div class="login__sub">登录后自动开始监听，改动摘要与分析会同步到团队网页</div>
+      </div>
+    </div>
+
+    <div class="login__tabs">
+      <gh-btn size="sm" data-tab="login" id="tabLogin">账号登录</gh-btn>
+      <gh-btn size="sm" data-tab="code" id="tabCode">配对码接入</gh-btn>
+    </div>
+
+    <div id="paneLogin">
+      <gh-field label="账号"><gh-input name="userLogin" placeholder="网页登录用的账号"></gh-input></gh-field>
+      <gh-field label="密码"><gh-input name="passLogin" type="password" placeholder="网页登录用的密码"></gh-input></gh-field>
+    </div>
+
+    <!-- 账号在多个团队里时必须选一次，否则会接进错的团队、网页上看不到任何记录 -->
+    <div id="teamPick" style="display:none">
+      <div class="pick__label">这个账号在多个团队里，选一个接入：</div>
+      <div class="pick__list" id="teamList"></div>
+    </div>
+
+    <div id="paneCode" style="display:none">
+      <gh-field label="配对码" hint="管理员在网页「引擎 → 生成配对码」里给出">
+        <gh-input name="pinCode" placeholder="XXXX-XXXX"></gh-input>
+      </gh-field>
+      <gh-field label="电脑用户名" hint="会在团队里自动建这个成员，日志与洞察挂在他名下">
+        <gh-input name="osUser" id="osUser"></gh-input>
+      </gh-field>
+    </div>
+
+    <!-- 正式使用时不让人看到服务端地址：内置默认，只有本机调试才展开改 -->
+    <div id="serverRow" style="display:none">
+      <gh-field label="服务端地址" hint="默认已内置，只有换环境时才需要改">
+        <gh-input name="baseUrl" id="baseUrl"></gh-input>
+      </gh-field>
+    </div>
+
+    <gh-btn variant="primary" class="login__submit" id="submitBtn" data-act="bind-login">登录并开始监听</gh-btn>
+    <div id="bindResult" class="login__msg"></div>
+    <p class="login__note">
+      和网页同一个账号时直接登录，不需要配对码；<br>
+      不同身份时用管理员给的一次性配对码接入，会自动在团队里建成员。<br>
+      <a href="#" id="serverToggle" style="color:#8c959f">使用其它服务端地址</a>
+    </p>
+  </div>
+</div>
+
+<!-- 主界面：只有登录成功后才会显示 -->
+<div id="appView" class="app" style="display:none">
+  <header class="hd">
+    <div class="hd__mark">◈</div>
+    <div>
+      <div class="hd__title">TeamFlow 客户端</div>
+      <div class="hd__meta">
+        <span id="team" class="team-chip">未连接</span>
+        <span>·</span>
+        <span id="device">—</span>
+      </div>
+    </div>
+    <div class="hd__spacer"></div>
+    <div class="hd__meta">
+      <span class="dot" id="dot"></span>
+      <span id="status">正在连接…</span>
+    </div>
+    <div class="hd__user">
+      <span>已登录 <b id="whoami">—</b></span>
+      <gh-btn size="sm" variant="invisible" id="logoutBtn" data-act="logout">退出登录</gh-btn>
+    </div>
+  </header>
+
+  <main>
+    <div class="stats">
+      <div class="stat"><div class="stat__k">监听目录</div><div class="stat__v small" id="root">—</div></div>
+      <div class="stat"><div class="stat__k">无操作间隔</div><div class="stat__v" id="idle">30 分钟</div></div>
+      <div class="stat"><div class="stat__k">采集模式</div><div class="stat__v" id="mode">静默</div></div>
+      <div class="stat"><div class="stat__k">已上报 / 待分析</div><div class="stat__v" id="counts">0 / 0</div></div>
+    </div>
+
+    <gh-box title="监听哪个文件夹">
+      <div class="acts" style="align-items:flex-end">
+        <div style="flex:1;min-width:320px">
+          <gh-field label="目录路径" hint="只有这个文件夹里的改动会被采集，可以直接粘贴路径">
+            <gh-input name="rootInput" id="rootInput" placeholder="例如 D:\Projects\我的项目"></gh-input>
+          </gh-field>
+        </div>
+        <gh-btn data-act="apply-root">应用</gh-btn>
+        <gh-btn data-act="folder">选择文件夹…</gh-btn>
+        <gh-btn data-act="open">打开</gh-btn>
+      </div>
+    </gh-box>
+
+    <div class="acts">
+      <gh-btn variant="primary" data-act="toggle" id="toggleBtn">暂停监听</gh-btn>
+      <gh-btn data-act="trigger">立即分析</gh-btn>
+      <gh-btn data-act="policy">刷新策略</gh-btn>
+      <span class="hint" id="hint">每 5 秒扫描一次，攒够一个无人操作窗口才上报</span>
+    </div>
+
+    <div id="error" class="err" style="display:none"></div>
+
+    <gh-box title="最近上报">
+      <div id="tableWrap">
+        <table>
+          <thead>
+            <tr><th style="width:80px">时间</th><th style="width:70px">文件</th><th style="width:110px">行数</th>
+                <th style="width:80px">事件</th><th style="width:80px">作业</th><th>状态</th></tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <div class="empty" id="empty">还没有上报记录，等一个无人操作窗口结束</div>
+      </div>
+    </gh-box>
+
+    <gh-box title="最近一次分析">
+      <div id="analysis" class="analysis">等待第一条日志…</div>
+    </gh-box>
+  </main>
+
+  <footer>
+    <span id="footerTeam">—</span>
+    <span>·</span>
+    <span id="policyTime">策略未同步</span>
+    <span style="margin-left:auto" id="skipText">端侧探针 · pywebview</span>
+  </footer>
+</div>
+
+<script src="vendor/gh-ui.js"></script>
+<script>
+  const $ = (id) => document.getElementById(id);
+  // pywebview 先注入空对象，方法稍后才挂上；这里等到 state 可用再开始轮询
+  const api = () => {
+    const bridge = window.pywebview && window.pywebview.api;
+    return bridge && typeof bridge.state === 'function' ? bridge : null;
+  };
+
+  const STATUS_TEXT = { ingested: '已分析', received: '已接收', rejected: '已拒收', ingest_failed: '分析失败' };
+
+  // 服务端地址内置：正式使用时用户只看到账号/密码或配对码。
+  // 换环境时才点「使用其它服务端地址」展开，改过的值记在本机，下次自动带出来。
+  const DEFAULT_SERVER = 'http://127.0.0.1:8000';
+  const SERVER_KEY = 'teamflow.server';
+
+  const readField = (name) => {
+    const node = document.querySelector(`[name="${name}"]`);
+    return node ? String(node.value || '').trim() : '';
+  };
+
+  const serverUrl = () => readField('baseUrl') || DEFAULT_SERVER;
+
+  let lastNotice = '';
+  let logoutArmed = false;
+  // 操作反馈要在提示行里停一会儿，别被每 3 秒的轮询立刻覆盖掉
+  let hintHold = 0;
+
+  function setHint(text, holdMs = 8000) {
+    const node = $('hint');
+    if (!node) return;
+    node.textContent = text;
+    hintHold = Date.now() + holdMs;
+  }
+  let logoutTimer = null;
+
+  function showLoginView() {
+    $('loginView').style.display = 'flex';
+    $('appView').style.display = 'none';
+  }
+
+  function showAppView() {
+    $('loginView').style.display = 'none';
+    $('appView').style.display = 'flex';
+  }
+
+  function paint(state) {
+    const bound = state.bound !== false;
+    // gh-box 自带 display:block，[hidden] 会被样式覆盖，这里直接改 style
+    if (bound) showAppView();
+    else showLoginView();
+
+    if (!bound && state.notice && state.notice !== lastNotice) {
+      lastNotice = state.notice;
+      // 「已退出登录」是正常结果，别渲染成红字错误
+      setLoginMsg(state.notice, /^已退出|^已断开/.test(state.notice) ? 'good' : 'bad');
+    }
+
+    $('team').textContent = state.team || '已接入';
+    $('device').textContent = state.device || '—';
+    $('whoami').textContent = state.username || '—';
+    $('root').textContent = state.root || '—';
+    $('idle').textContent = `${state.idle_minutes} 分钟`;
+    $('mode').textContent = state.allow_view ? '可见（上传路径与符号）' : '静默（只传符号与统计）';
+    $('counts').textContent = `${state.uploaded} / ${state.pending}`;
+    // 待分析不是「卡住」：改动先攒着，等连续 N 分钟没有写入才结算成一单
+    if (Date.now() > hintHold) {
+      const idle = state.idle_minutes || 3;
+      const left = Number(state.settle_in);
+      if (state.pending && Number.isFinite(left) && left >= 0) {
+        // 把「还要等多久」直接摆出来，别让人以为探针没工作
+        const mm = Math.floor(left / 60);
+        const ss = left % 60;
+        const wait = mm > 0 ? `${mm} 分 ${ss} 秒` : `${ss} 秒`;
+        $('hint').textContent = `已攒下 ${state.pending} 个文件的改动 · 还差 ${wait} 自动分析`;
+      } else if (state.pending) {
+        $('hint').textContent = `已攒下 ${state.pending} 个文件的改动，连续 ${idle} 分钟没有写入就自动上报`;
+      } else {
+        $('hint').textContent = '每 5 秒扫描一次，当前没有待上报的改动';
+      }
+    }
+    // 服务端地址属于部署细节，正式界面不展示
+    $('footerTeam').textContent = state.team || '未接入团队';
+    $('policyTime').textContent = state.policy_updated ? `策略更新：${state.policy_updated}` : '策略未同步';
+    $('skipText').textContent = state.skipped
+      ? `重复跳过 ${state.skipped} 次 · 端侧探针`
+      : '端侧探针 · pywebview';
+
+    const rootInput = $('rootInput');
+    if (rootInput && document.activeElement !== rootInput) rootInput.value = state.root || '';
+    const osUser = $('osUser');
+    if (osUser && !osUser.value) osUser.value = state.os_user || '';
+
+    const running = state.running && !state.paused;
+    $('dot').className = 'dot ' + (running ? 'on' : (state.error ? 'err' : ''));
+    $('status').textContent = !bound ? '未登录' : (running ? '监听中' : '已暂停');
+    $('toggleBtn').textContent = running ? '暂停监听' : '开始监听';
+    if (bound) $('toggleBtn').removeAttribute('disabled');
+    else $('toggleBtn').setAttribute('disabled', '');
+
+    const err = $('error');
+    if (state.error) {
+      err.style.display = 'block';
+      err.textContent = '上报失败：' + state.error;
+    } else {
+      err.style.display = 'none';
+    }
+
+    const analysis = (state.last_analysis || '').trim();
+    const box = $('analysis');
+    box.textContent = analysis || '等待第一条日志…';
+    box.className = 'analysis' + (analysis ? '' : ' empty-state');
+
+    const rows = state.logs || [];
+    $('empty').style.display = rows.length ? 'none' : 'block';
+    $('rows').innerHTML = rows.map((log) => `
+      <tr>
+        <td class="mono">${log.time}</td>
+        <td class="mono">${log.files}</td>
+        <td class="mono">+${log.additions} / −${log.deletions}</td>
+        <td class="mono">${log.event_id ?? '—'}</td>
+        <td class="mono">${log.job_id ?? '—'}</td>
+        <td>${STATUS_TEXT[log.status] || log.status || ''}</td>
+      </tr>`).join('');
+  }
+
+  async function tick() {
+    const bridge = api();
+    if (!bridge) return;
+    try {
+      paint(await bridge.state());
+    } catch (error) {
+      $('status').textContent = '连接异常';
+      $('dot').className = 'dot err';
+    }
+  }
+
+  function setLoginMsg(text, tone) {
+    const box = $('bindResult');
+    box.textContent = text || '';
+    box.className = 'login__msg' + (tone ? ' ' + tone : '');
+  }
+
+  function activeTab() {
+    return $('paneLogin').style.display === 'none' ? 'code' : 'login';
+  }
+
+  function switchTab(tab) {
+    const login = tab === 'login';
+    $('paneLogin').style.display = login ? '' : 'none';
+    $('paneCode').style.display = login ? 'none' : '';
+    $('tabLogin').setAttribute('variant', login ? 'primary' : 'default');
+    $('tabCode').setAttribute('variant', login ? 'default' : 'primary');
+    const submit = $('submitBtn');
+    submit.textContent = login ? '登录并开始监听' : '用配对码接入';
+    submit.setAttribute('data-act', login ? 'bind-login' : 'bind-code');
+    renderTeamPick([]);
+    setLoginMsg('');
+    const first = login ? document.querySelector('[name="userLogin"]') : document.querySelector('[name="pinCode"]');
+    if (first && first.focus) first.focus();
+  }
+
+  function renderTeamPick(teams) {
+    const box = $('teamPick');
+    const list = $('teamList');
+    if (!list) return;
+    list.innerHTML = (teams || []).map((item) => {
+      const slug = encodeURIComponent(String(item.slug || ''));
+      const name = String(item.name || item.slug || '');
+      return `<button type="button" class="pick__item" data-team="${slug}"><b>${name}</b> · ${String(item.slug || '')}</button>`;
+    }).join('');
+    box.style.display = (teams || []).length ? 'block' : 'none';
+  }
+
+  async function bind(kind, team) {
+    const bridge = api();
+    if (!bridge) { setLoginMsg('本地服务还没就绪，稍等一下再试', 'bad'); return; }
+    const submit = $('submitBtn');
+    const base = serverUrl();
+    if (kind === 'login' && (!readField('userLogin') || !readField('passLogin'))) {
+      setLoginMsg('请填写账号与密码', 'bad');
+      return;
+    }
+    if (kind === 'code' && !readField('pinCode')) {
+      setLoginMsg('请填写配对码', 'bad');
+      return;
+    }
+    setLoginMsg(team ? '正在接入所选团队…' : '正在连接服务端…');
+    submit.setAttribute('disabled', '');
+    try {
+      const result = kind === 'login'
+        ? await bridge.bind_login(base, readField('userLogin'), readField('passLogin'), team || '')
+        : await bridge.bind_code(base, readField('pinCode'), readField('osUser'));
+      if (result && result.ok) {
+        renderTeamPick([]);
+        setLoginMsg(result.created_user
+          ? `已接入：团队 ${result.team || ''}，新建成员 ${result.username || ''}`
+          : `已接入：团队 ${result.team || ''}${result.username ? `，设备属于 ${result.username}` : ''}`, 'good');
+        const pass = document.querySelector('[name="passLogin"]');
+        if (pass) pass.value = '';
+        const pin = document.querySelector('[name="pinCode"]');
+        if (pin) pin.value = '';
+        try { localStorage.setItem(SERVER_KEY, base); } catch (error) { /* 隐私模式忽略 */ }
+        lastNotice = '';
+        await tick();
+      } else if (result && result.need_team) {
+        renderTeamPick(result.teams || []);
+        setLoginMsg('这个账号在多个团队里，先选一个再接入', 'bad');
+      } else {
+        setLoginMsg(`登录失败：${(result && result.error) || '未知错误'}`, 'bad');
+      }
+    } catch (error) {
+      setLoginMsg('登录失败：' + (error && error.message ? error.message : error), 'bad');
+    } finally {
+      submit.removeAttribute('disabled');
+    }
+  }
+
+  async function logout() {
+    const btn = $('logoutBtn');
+    if (!logoutArmed) {
+      // 第一次点只是「上膛」，4 秒内再点一次才真的退出，避免误触
+      logoutArmed = true;
+      btn.textContent = '确认退出？';
+      clearTimeout(logoutTimer);
+      logoutTimer = setTimeout(() => {
+        logoutArmed = false;
+        btn.textContent = '退出登录';
+      }, 4000);
+      return;
+    }
+    logoutArmed = false;
+    clearTimeout(logoutTimer);
+    btn.textContent = '退出登录';
+    const bridge = api();
+    if (!bridge) return;
+    btn.setAttribute('disabled', '');
+    try {
+      const result = await bridge.logout();
+      if (result && result.ok) {
+        lastNotice = '已退出登录';   // 与服务端 notice 对齐，免得被 paint 覆盖成红字
+        setLoginMsg('已退出登录，可以换账号登录', 'good');
+        const pass = document.querySelector('[name="passLogin"]');
+        if (pass) pass.value = '';
+        await tick();
+      } else {
+        setHint(`退出失败：${(result && result.error) || '未知错误'}`);
+      }
+    } finally {
+      btn.removeAttribute('disabled');
+    }
+  }
+
+  document.addEventListener('click', async (event) => {
+    const serverToggle = event.target.closest('#serverToggle');
+    if (serverToggle) {
+      event.preventDefault();
+      const row = $('serverRow');
+      const open = row.style.display === 'none';
+      row.style.display = open ? '' : 'none';
+      serverToggle.textContent = open ? '收起服务端地址' : '使用其它服务端地址';
+      if (open) {
+        const input = document.querySelector('[name="baseUrl"]');
+        if (input && input.focus) input.focus();
+      }
+      return;
+    }
+    const tab = event.target.closest('[data-tab]');
+    if (tab) { switchTab(tab.getAttribute('data-tab')); return; }
+    const teamBtn = event.target.closest('[data-team]');
+    if (teamBtn) {
+      bind('login', decodeURIComponent(teamBtn.getAttribute('data-team') || ''));
+      return;
+    }
+    const btn = event.target.closest('[data-act]');
+    const bridge = api();
+    if (!btn || !bridge) return;
+    const act = btn.getAttribute('data-act');
+    if (act === 'bind-login' || act === 'bind-code') {
+      bind(act === 'bind-login' ? 'login' : 'code');
+      return;
+    }
+    if (act === 'logout') { logout(); return; }
+    if (act === 'apply-root') {
+      const res = await bridge.set_root(readField('rootInput'));
+      setHint(res && res.ok ? `已切换：${res.root}` : `切换失败：${(res && res.error) || '未知错误'}`);
+      await tick();
+      return;
+    }
+    btn.setAttribute('disabled', '');
+    try {
+      if (act === 'toggle') {
+        const res = await bridge.toggle();
+        if (res && res.ok === false && res.message) setHint(res.message);
+      }
+      if (act === 'trigger') {
+        const res = await bridge.trigger();
+        setHint(res.message || '已提交');
+      }
+      if (act === 'policy') {
+        const res = await bridge.refresh_policy();
+        if (res && res.error) setHint(res.error);
+      }
+      if (act === 'folder') await bridge.choose_folder();
+      if (act === 'open') await bridge.open_folder();
+      await tick();
+    } catch (error) {
+      setHint('操作失败：' + (error && error.message ? error.message : error));
+    } finally {
+      btn.removeAttribute('disabled');
+    }
+  });
+
+  // 密码框回车直接登录
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    const name = event.target && event.target.getAttribute && event.target.getAttribute('name');
+    if (['passLogin', 'pinCode', 'userLogin', 'baseUrl', 'osUser'].includes(name)) {
+      bind(activeTab());
+    }
+  });
+
+  try {
+    const saved = localStorage.getItem(SERVER_KEY);
+    const input = document.querySelector('[name="baseUrl"]');
+    if (input) input.value = saved || DEFAULT_SERVER;
+  } catch (error) { /* 隐私模式忽略 */ }
+
+  async function boot() {
+    for (let i = 0; i < 40; i += 1) {
+      if (api()) {
+        await tick();
+        setInterval(tick, 1200);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    $('status').textContent = '本地服务未就绪';
+    $('dot').className = 'dot err';
+  }
+
+  switchTab('login');
+  window.addEventListener('pywebviewready', boot);
+  boot();
+</script>
+</body>
+</html>

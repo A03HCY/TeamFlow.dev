@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import socket
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -86,6 +87,38 @@ def _json_request(
         raise EdgeApiError(
             detail or f"服务端返回 HTTP {exc.code}", status=int(exc.code or 0), code=code
         ) from exc
+    except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
+        raise EdgeApiError(f"连接服务端失败：{exc}") from exc
+    if not text.strip():
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise EdgeApiError("服务端返回的不是 JSON") from exc
+    return data if isinstance(data, dict) else {"data": data}
+
+
+def _get_json(
+    url: str,
+    *,
+    timeout: float = DEFAULT_TIMEOUT,
+    headers: dict | None = None,
+) -> dict:
+    """GET 一个 JSON 端点（用于拉取策略）。"""
+    request = urllib.request.Request(url, method="GET")
+    for key, value in (headers or {}).items():
+        request.add_header(key, str(value))
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            text = response.read(MAX_RESPONSE_BYTES).decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        try:
+            text = exc.read(MAX_RESPONSE_BYTES).decode("utf-8", "replace")
+            data = json.loads(text) if text else {}
+            detail = str(data.get("error") or data.get("detail") or "")
+        except (ValueError, OSError):
+            detail = ""
+        raise EdgeApiError(detail or f"服务端返回 HTTP {exc.code}", status=int(exc.code or 0)) from exc
     except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
         raise EdgeApiError(f"连接服务端失败：{exc}") from exc
     if not text.strip():
@@ -176,6 +209,29 @@ class RestFallback:
         except json.JSONDecodeError as exc:
             raise EdgeApiError("健康检查返回的不是 JSON") from exc
         return data if isinstance(data, dict) else {}
+
+    def fetch_policy(self) -> dict:
+        """拉取团队当前的采集策略（间隔时长、是否允许查看变动内容）。"""
+        url = f"{self.base_url}/api/edge/policy?token={urllib.parse.quote(self.token)}"
+        data = _get_json(url, timeout=self.timeout, headers=self.headers)
+        if not data.get("ok"):
+            raise EdgeApiError("服务端没有返回有效策略")
+        return data
+
+    def post_log(self, log: dict, envelope: dict | None = None) -> dict:
+        """上报一条无人操作窗口日志；带 envelope 时服务端会顺带触发一次推断。"""
+        payload: dict = {"token": self.token, "log": log}
+        if envelope:
+            payload["envelope"] = envelope
+        data = _json_request(
+            self.base_url + "/api/edge/logs",
+            payload,
+            timeout=self.timeout,
+            headers=self.headers,
+        )
+        if not data.get("ok"):
+            raise EdgeApiError(str(data.get("message") or "服务端没有确认这条日志"))
+        return data
 
     def __call__(self, envelope: dict) -> dict:
         """让对象本身就能当 ``EdgeClient(rest_fallback=…)`` 的回调用。"""

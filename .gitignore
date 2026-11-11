@@ -222,6 +222,8 @@ __marimo__/
 # TeamFlow runtime data
 server/data/
 server/backups/
+# 本地数据备份：含真实业务数据、体积大，不进版本库
+/backups/
 *.db
 *.db-shm
 *.db-wal

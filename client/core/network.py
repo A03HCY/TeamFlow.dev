@@ -238,11 +238,15 @@ def build_event(
     redactions: int = 0,
     trigger: str = "save",
     ts: str | None = None,
+    digest: dict | None = None,
 ) -> dict:
     """组装一个 schema v1 事件包。
 
     ``stats`` 省略时按 ``files`` 自动统计（含测试文件计数），``files`` 里的
     ``lang`` 省略时按扩展名补。只做本地最基本的自检，服务端仍会全量校验。
+
+    ``digest`` 是本轮的符号级摘要（新增/移除了哪些函数、类、文档小节），
+    不含路径也不含代码原文——静默模式下也会上行，让推断能说出「改了什么」。
     """
     repo_payload = dict(repo or {})
     if not repo_payload.get("path_hash"):
@@ -253,6 +257,7 @@ def build_event(
         if not entry.get("lang"):
             entry["lang"] = lang_for(str(entry.get("path") or ""))
         file_items.append(entry)
+    content_digest = dict(digest or {})
     return {
         "schema_version": SCHEMA_VERSION,
         "event_uid": event_uid,
@@ -263,6 +268,13 @@ def build_event(
         "repo": repo_payload,
         "stats": dict(stats) if stats is not None else summarize_files(file_items),
         "files": file_items,
+        "digest": {
+            "added": [str(name)[:60] for name in (content_digest.get("added") or [])][:16],
+            "removed": [str(name)[:60] for name in (content_digest.get("removed") or [])][:16],
+            "notes": [str(note)[:70] for note in (content_digest.get("notes") or [])][:8],
+            # 新增的内容行：文档是正文，代码是骨架行。没有它，洞察只能说「多了六行」。
+            "lines": [str(line)[:70] for line in (content_digest.get("lines") or [])][:10],
+        },
         "redactions": int(redactions),
         "redacted": True,
         "notes": notes or "",
