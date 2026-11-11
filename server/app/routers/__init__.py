@@ -5,6 +5,7 @@ from . import (
     ai,
     auth,
     avatars,
+    client_policy,
     edge,
     issues,
     labels,
@@ -30,6 +31,7 @@ routers = [
     teams.router,
     edge.router,
     edge.ws_router,
+    client_policy.router,
     avatars.public_router,
     avatars.router,
 ]

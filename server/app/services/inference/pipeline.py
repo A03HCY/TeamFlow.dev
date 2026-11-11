@@ -21,15 +21,12 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ...config import (
-    ENGINE_INSIGHT_MERGE_MINUTES,
-    ENGINE_RULES_MIN_CONFIDENCE,
-)
+from ...config import ENGINE_INSIGHT_MERGE_MINUTES
 from ...db.base import utcnow_iso
 from ...db.engine_models import CodeEvent, InferenceJob, Insight, InsightEvent
 from ...db.models import Issue
 from ..engine import check_analysis, clamp_analysis, looks_like_injection
-from ..inference import audit, rules
+from ..inference import admission, audit, rules
 from ..inference.events import CodeEventEnvelope
 
 SUGGESTED_KINDS = ("progress", "unscoped", "hint")
@@ -46,6 +43,8 @@ class PipelineResult:
     skipped: str = ""
     events: int = 0
     confidence: float = 0.0
+    #: 准入结论（verdict / reason / source），skip 时也要能复盘「为什么没建卡」
+    admission: dict | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -57,6 +56,7 @@ class PipelineResult:
             "skipped": self.skipped,
             "events": self.events,
             "confidence": self.confidence,
+            "admission": self.admission,
         }
 
 
@@ -141,6 +141,113 @@ def _find_open_insight(session: Session, team_id: int, dedupe_key: str) -> Insig
     ).scalar_one_or_none()
 
 
+def _progress_comment(signals, summary_text: str, progress: str = "") -> str:
+    """写回议题的进度记录（人话版：这一轮到底做了什么）。
+
+    ``progress`` 是模型给的「这一步实现了什么」；有它就先说能力，
+    再列改动事实——纯文件清单对人没有阅读价值。
+    """
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    detail = rules.digest_line(signals)
+    lines = [f"**端侧自动分析（{stamp}）**", ""]
+    if progress:
+        lines.append(f"- 进度：{progress}")
+    lines.append(f"- 本轮改动：{detail}")
+    lines.append(f"- 判断结论：{summary_text}")
+    return "\n".join(lines)[:2000]
+
+
+def _progress_body(signals) -> str:
+    """追加到议题正文末尾的进度段（保留历史，不覆盖人工写的描述）。"""
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    return f"\n\n---\n**自动进度 · {stamp}**\n\n- {rules.digest_line(signals)}\n"
+
+
+def _actions_for(
+    issue,
+    analysis: dict,
+    signals,
+    title: str,
+    summary_text: str,
+    best: dict,
+    decision: admission.Decision | None = None,
+) -> list[dict]:
+    """把一条洞察翻成可执行动作。
+
+    没有 ``actions`` 的洞察在「预览并应用」里会直接报「没有可执行的动作」，
+    于是永远停在待确认——这不是提示问题，是链路断在这里。
+
+    有议题时必须**同时**带上 ``comment`` 与 ``body_append``：只改 status 的话，
+    议题状态本来就在「进行中」时点了应用等于什么都没发生，用户会认为 AI 没干活。
+
+    模型给出的建议（改状态 / 改正文 / 新建议题 / 新增或修改里程碑）在这里被翻成
+    动作，但**不直接落库**——仍然要人在卡片上点「预览并应用」。模型能提议，
+    人保留否决权，这是这套系统的底线。
+    """
+    plan_issue = dict(getattr(decision, "issue_update", None) or {})
+    plan_new = dict(getattr(decision, "new_issue", None) or {})
+    plan_ms = dict(getattr(decision, "milestone", None) or {})
+
+    status = str(plan_issue.get("status") or analysis.get("status") or "in_progress")
+    week = str(best.get("plan_week") or "")
+    actions: list[dict] = []
+
+    # 里程碑要先建、后挂：新建的议题可以直接落到这个里程碑下（milestone="new"）
+    if plan_ms.get("action") == "create":
+        actions.append({
+            "op": "create_milestone",
+            "title": plan_ms["title"],
+            "description": plan_ms.get("description") or "",
+            "acceptance": plan_ms.get("acceptance") or "",
+            "kind": "scheduled",
+        })
+
+    if issue is not None:
+        action = {
+            "op": "update_issue",
+            "issue": issue.number,
+            "status": status,
+            # 进度记录：落到 comments 表，议题页立刻能看到
+            "comment": _progress_comment(signals, summary_text, plan_issue.get("progress", "")),
+            # 覆写：把本轮进度追加到正文，不覆盖原有描述
+            "body_append": plan_issue.get("body_append") or _progress_body(signals),
+        }
+        if plan_issue.get("priority"):
+            action["priority"] = plan_issue["priority"]
+        if week:
+            action["plan_week"] = week
+        actions.append(action)
+    else:
+        branch = str(getattr(signals, "branch", "") or "主分支")
+        detail = rules.digest_line(signals)
+        body = plan_new.get("body") or f"{summary_text}\n\n本轮改动：{detail}"
+        action = {
+            "op": "create_issue",
+            # 模型起的标题更像人话；没有就用端侧模板兜底
+            "title": str(plan_new.get("title") or f"[端侧] {branch}：{title}")[:240],
+            "body": body[:4000],
+            "status": "todo" if status == "todo" else "in_progress",
+            "plan_week": week,
+        }
+        if plan_new.get("priority"):
+            action["priority"] = plan_new["priority"]
+        if plan_new.get("milestone"):
+            action["milestone"] = plan_new["milestone"]
+        elif plan_ms.get("action") == "create":
+            # 本轮同时新建了里程碑：把新议题挂上去，由执行器按顺序解析
+            action["milestone"] = "new"
+        actions.append(action)
+
+    if plan_ms.get("action") == "update":
+        action = {"op": "update_milestone", "milestone": plan_ms["number"]}
+        for key in ("title", "description", "acceptance", "state"):
+            if plan_ms.get(key):
+                action[key] = plan_ms[key]
+        actions.append(action)
+
+    return actions
+
+
 def _issue(session: Session, team_id: int, number: int) -> Issue | None:
     if not number:
         return None
@@ -200,31 +307,70 @@ def run_job(session: Session, job: InferenceJob) -> PipelineResult:
         )
     analysis = clamp_analysis(analysis)
 
-    if confidence < ENGINE_RULES_MIN_CONFIDENCE:
+    # 准入闸门：这一段决定「这条事件该不该变成洞察、属于哪个议题」。
+    # 以前这里只有一句 `confidence < 0.2 就丢`，而置信度只看文件后缀，
+    # 于是「改一行注释」能建卡、「写一页需求文档」被丢掉。判断逻辑现在
+    # 集中在 admission：硬性噪声先挡、分支号优先归属、灰色地带问模型。
+    decision = admission.decide(
+        session,
+        team_id=job.team_id,
+        signals=signals,
+        confidence=confidence,
+        has_issue=issue is not None,
+    )
+    if decision.skips:
         return PipelineResult(
             ok=True,
             job_id=job.id,
             events=len(events),
             confidence=confidence,
-            skipped=f"置信度 {confidence:.2f} 低于阈值 {ENGINE_RULES_MIN_CONFIDENCE:.2f}",
+            skipped=f"准入拒绝：{decision.reason}",
+            admission=decision.as_dict(),
         )
+
+    # 模型可能在候选议题里找到了分支名之外的归属；找不到才维持原判断
+    if decision.issue_number and (issue is None or issue.number != decision.issue_number):
+        matched = _issue(session, job.team_id, decision.issue_number)
+        if matched is not None:
+            issue = matched
+    if decision.verdict == admission.VERDICT_CREATE:
+        # 明确要求新开一条：即使分支名指向某个议题，也不要把新功能塞进旧议题
+        issue = None
 
     kind = "progress" if issue is not None else "unscoped"
     dedupe_key = dedupe_key_for(issue.id if issue else None, signals.branch, kind)
     evidence = list(analysis.get("evidence") or [])
     risks = list(analysis.get("risks") or [])
+    summary_text = str(analysis.get("summary") or "")[:4000]
+    title = str(best.get("title") or "进度线索")[:240]
+    if issue is not None:
+        # 归属可能是准入阶段才由模型定下来的（分支名没带编号），标题必须跟着改，
+        # 否则会出现「标题写未关联议题、卡片却挂着 #17」这种自相矛盾
+        title = f"#{issue.number} {issue.title}"[:240]
+    elif decision.title:
+        # 模型读懂了这次改动的主题，标题比「新增了 xxx()」更像人话
+        title = f"未关联议题的变更：{decision.title}"[:240]
     suggestion = {
         "status": analysis.get("status") or "in_progress",
         "plan_week": best.get("plan_week") or "",
-        "comment": "",
+        # 预览区展示「应用后会追加什么」，避免用户点了之后看不出变化
+        "comment": _progress_comment(
+            signals, summary_text, str(decision.issue_update.get("progress") or "")
+        )[:800],
         "completion": analysis.get("completion"),
         "dry_run": True,
+        # 没有 actions 的洞察在「预览并应用」里是死路（会提示没有可执行动作），
+        # 所以每条洞察都必须能落到业务表：有议题就更新状态，没议题就建议一条新议题
+        "actions": _actions_for(issue, analysis, signals, title, summary_text, best, decision),
+        # 把「为什么建这张卡 / 为什么挂这个议题」一并落库，事后可复盘
+        "admission": decision.as_dict(),
     }
+    model_tag = MODEL_TAG if decision.source == "rules" else f"{MODEL_TAG}+ai-gate"
     if looks_like_injection(json.dumps(signals.top_files, ensure_ascii=False)):
         risks.append("文件路径里出现疑似提示词注入内容，已按数据处理")
-
-    summary_text = str(analysis.get("summary") or "")[:4000]
-    title = str(best.get("title") or "进度线索")[:240]
+    # 注释线索是端侧的自由文本（虽然已限长），同样按不可信输入处理
+    if signals.notes_added and looks_like_injection(json.dumps(signals.notes_added, ensure_ascii=False)):
+        risks.append("改动说明里出现疑似提示词注入内容，已按数据处理")
 
     existing = _find_open_insight(session, job.team_id, dedupe_key)
     if existing is not None:
@@ -234,7 +380,7 @@ def run_job(session: Session, job: InferenceJob) -> PipelineResult:
         existing.evidence = _dumps(evidence)
         existing.suggestion = _dumps(suggestion)
         existing.job_id = job.id
-        existing.model = MODEL_TAG
+        existing.model = model_tag
         session.flush()
         append_insight_event(
             session,
@@ -254,6 +400,7 @@ def run_job(session: Session, job: InferenceJob) -> PipelineResult:
             merged=True,
             events=len(events),
             confidence=confidence,
+            admission=decision.as_dict(),
         )
 
     insight = Insight(
@@ -270,7 +417,7 @@ def run_job(session: Session, job: InferenceJob) -> PipelineResult:
         evidence=_dumps(evidence),
         suggestion=_dumps(suggestion),
         applied="{}",
-        model=MODEL_TAG,
+        model=model_tag,
         dedupe_key=dedupe_key,
         created_at=utcnow_iso(),
         decided_at=None,
@@ -303,7 +450,8 @@ def run_job(session: Session, job: InferenceJob) -> PipelineResult:
             "confidence": confidence,
             "kind": kind,
             "job_id": job.id,
-            "model": MODEL_TAG,
+            "model": model_tag,
+            "admission": decision.as_dict(),
         },
         actor=(None, "推理引擎"),
     )
@@ -314,6 +462,7 @@ def run_job(session: Session, job: InferenceJob) -> PipelineResult:
         created=True,
         events=len(events),
         confidence=confidence,
+        admission=decision.as_dict(),
     )
 
 

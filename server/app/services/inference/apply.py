@@ -30,6 +30,9 @@ from ..teams import next_issue_number
 OPS = ("create_issue", "create_milestone", "update_issue", "update_milestone",
        "close_issue", "assign")
 
+#: 动作里出现状态值时给中文，避免预览里冒出英文枚举
+STATUS_TEXT = {"todo": "待办", "in_progress": "进行中", "done": "已完成"}
+
 #: 撤销窗口（分钟）
 REVERT_MINUTES = 5
 
@@ -55,13 +58,40 @@ def describe(action: dict) -> str:
     title = str(action.get("title") or "")
     if op == "create_issue":
         parent = action.get("parent")
-        return f"新建议题「{title}」" + (f"（父议题 #{parent}）" if parent else "")
+        milestone = action.get("milestone")
+        tail = ""
+        if parent:
+            tail += f"（父议题 #{parent}）"
+        if milestone == "new":
+            tail += "（挂到本次新建的里程碑）"
+        elif milestone:
+            tail += f"（里程碑 #{milestone}）"
+        return f"新建议题「{title}」{tail}"
     if op == "create_milestone":
         return f"新建里程碑「{title}」"
     if op == "update_issue":
-        return f"更新议题 #{action.get('issue')}"
+        bits: list[str] = []
+        status = action.get("status")
+        if status:
+            bits.append(f"状态 → {STATUS_TEXT.get(status, status)}")
+        if action.get("priority"):
+            bits.append(f"优先级 → {action.get('priority')}")
+        if action.get("body_append"):
+            bits.append("覆写正文（追加本轮进度）")
+        if action.get("comment"):
+            bits.append("追加 1 条进度记录")
+        tail = f"（{'，'.join(bits)}）" if bits else ""
+        return f"更新议题 #{action.get('issue')}{tail}"
     if op == "update_milestone":
-        return f"更新里程碑 #{action.get('milestone')}（验收标准）"
+        bits = []
+        if action.get("state"):
+            bits.append("标记完成" if action.get("state") == "done" else "重新打开")
+        if action.get("acceptance"):
+            bits.append("更新验收标准")
+        if action.get("title"):
+            bits.append("改标题")
+        tail = f"（{'，'.join(bits)}）" if bits else ""
+        return f"更新里程碑 #{action.get('milestone')}{tail}"
     if op == "close_issue":
         return f"关闭议题 #{action.get('issue')}"
     if op == "assign":
@@ -123,6 +153,25 @@ def _resolve_labels(session: Session, team_id: int, action: dict) -> list[int]:
 
 def _issue_before(issue: Issue) -> dict:
     return {field: getattr(issue, field, None) for field in _SNAPSHOT_FIELDS}
+
+
+def _append_comment(
+    session: Session, issue: Issue, text, *, actor_id: int | None, actor_name: str
+) -> int | None:
+    """往议题里写一条进度记录；返回评论 id（撤销时按 id 删掉）。"""
+    body = str(text or "").strip()
+    if not body:
+        return None
+    row = Comment(
+        issue_id=issue.id,
+        user_id=actor_id,
+        author_name=(actor_name or "推理引擎")[:80],
+        body=body[:8000],
+        created_at=utcnow_iso(),
+    )
+    session.add(row)
+    session.flush()
+    return row.id
 
 
 # ------------------------------------------------------------------ 执行
@@ -188,7 +237,10 @@ def execute(
                 data["parent_id"] = parent.number
                 if data.get("milestone_id") in (None, ""):
                     data["milestone_id"] = parent.milestone_id
-            if action.get("milestone") not in (None, ""):
+            if action.get("milestone") == "new" and created_milestones:
+                # 同一条提案里刚建的里程碑：按动作顺序取最后一个，省得再查一次
+                data["milestone_id"] = created_milestones[-1]
+            elif action.get("milestone") not in (None, ""):
                 milestone = _resolve_milestone(session, team.id, action.get("milestone"))
                 data["milestone_id"] = milestone.id
             issue = create_issue(session, team, data, next_issue_number(session, team))
@@ -214,6 +266,10 @@ def execute(
             issue = _resolve_issue(session, team.id, action.get("issue"))
             before = _issue_before(issue)
             payload = {key: action[key] for key in _SNAPSHOT_FIELDS if key in action}
+            # body_append 是「追加一段进度」而不是整段覆写，避免冲掉人写的描述
+            appended = str(action.get("body_append") or "")
+            if appended:
+                payload["body"] = ((issue.body or "") + appended)[:20000]
             if "milestone" in action and action.get("milestone") not in (None, ""):
                 payload["milestone_id"] = _resolve_milestone(
                     session, team.id, action.get("milestone")
@@ -225,15 +281,32 @@ def execute(
                     None if action.get("parent") in (None, "", "none")
                     else _resolve_issue(session, team.id, action.get("parent")).number
                 )
+            if not payload:
+                raise ApiError("提案没有给出要更新的字段")
             update_issue(session, issue, payload)
-            updated.append({"id": issue.id, "kind": "issue", "before": before})
+            comment_id = _append_comment(
+                session, issue, action.get("comment"),
+                actor_id=actor_id, actor_name=actor_name,
+            )
+            updated.append({
+                "id": issue.id, "kind": "issue", "before": before,
+                "comments": [comment_id] if comment_id else [],
+            })
+            note = "，并追加进度记录" if comment_id else ""
             results.append({"op": op, "ok": True, "number": issue.number,
-                            "text": f"更新 #{issue.number}"})
+                            "text": f"更新 #{issue.number}{note}"})
         elif op == "close_issue":
             issue = _resolve_issue(session, team.id, action.get("issue"))
             before = _issue_before(issue)
             update_issue(session, issue, {"status": "done"})
-            updated.append({"id": issue.id, "kind": "issue", "before": before})
+            comment_id = _append_comment(
+                session, issue, action.get("comment"),
+                actor_id=actor_id, actor_name=actor_name,
+            )
+            updated.append({
+                "id": issue.id, "kind": "issue", "before": before,
+                "comments": [comment_id] if comment_id else [],
+            })
             results.append({"op": op, "ok": True, "number": issue.number,
                             "text": f"关闭 #{issue.number}"})
         elif op == "assign":
@@ -362,12 +435,17 @@ def revert(
     for item in snapshot.get("updated", []):
         model = Issue if item.get("kind") == "issue" else Milestone
         row = session.get(model, int(item.get("id") or 0))
-        if row is None:
-            continue
-        for field, value in (item.get("before") or {}).items():
-            if hasattr(row, field):
-                setattr(row, field, value)
-        restored.append(f"{item.get('kind')}:{item.get('id')}")
+        if row is not None:
+            for field, value in (item.get("before") or {}).items():
+                if hasattr(row, field):
+                    setattr(row, field, value)
+            restored.append(f"{item.get('kind')}:{item.get('id')}")
+        # 应用时追加的进度记录也一起撤掉，避免正文回滚了、评论还留着
+        for comment_id in item.get("comments") or []:
+            comment = session.get(Comment, int(comment_id))
+            if comment is not None:
+                session.delete(comment)
+                restored.append(f"comment:{comment_id}")
 
     session.flush()
     insight.state = "reverted"

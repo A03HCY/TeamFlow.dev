@@ -6,10 +6,14 @@
 """
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
-from ..db.models import TeamMember
+from ..db import session as db_session
+from ..db.models import Team, TeamMember
 from ..deps import Ctx, TeamAccess, get_ctx, read_body, team_access
 from ..errors import ApiError
 from ..security import client_ip
@@ -39,6 +43,30 @@ def require_platform_admin(ctx: Ctx) -> None:
     )
     if ok is None:
         raise ApiError("需要团队管理员权限", 403)
+
+
+@router.post("/config/test")
+def test_config(body: dict = Depends(read_body), ctx: Ctx = Depends(get_ctx)) -> dict:
+    """验证一组配置能否真的调通：优先用表单里刚填的值，没填的用已保存的。"""
+    require_platform_admin(ctx)
+    saved = ai.get_config(ctx.session)
+    cfg = {
+        "base_url": str(body.get("base_url") or "").strip() or saved["base_url"],
+        "model": str(body.get("model") or "").strip() or saved["model"],
+        "api_key": str(body.get("api_key") or "").strip() or saved["api_key"],
+    }
+    if not ai.is_configured(cfg):
+        raise ApiError("请先填写接口地址、模型和 API Key", 400, code="ai_not_configured")
+    try:
+        result = ai.probe(cfg)
+    except ValueError as exc:
+        raise ApiError(str(exc), 400, code="ai_probe_failed") from exc
+    return {
+        "ok": True,
+        "endpoint": ai._endpoint(cfg["base_url"]),
+        "model": result["model"],
+        "reply": result["reply"],
+    }
 
 
 @router.get("/config")
@@ -148,6 +176,74 @@ def assistant_chat(body: dict = Depends(read_body),
 
 
 # ---------------------------------------------------------------- AI 工作台会话
+
+
+@team_router.post("/ai/chat/stream")
+def assistant_chat_stream(body: dict = Depends(read_body),
+                          access: TeamAccess = Depends(team_access)) -> StreamingResponse:
+    """流式版助手对话：边生成边推，前端先看到文字再看到结果。
+
+    配置错误、参数错误在开流之前就用普通 JSON 报出去，避免「响应已经开始、
+    只能塞错误事件」的尴尬。
+    """
+    access.require_read("issues")
+    _limit(access.ctx, "ai-chat")
+    session = access.session
+    message = str(body.get("message") or "").strip()
+    messages = body.get("messages")
+    session_id = body.get("session_id")
+    try:
+        session_id = int(session_id) if session_id not in (None, "") else None
+    except (TypeError, ValueError):
+        raise ApiError("会话编号不正确") from None
+    if not message and not messages:
+        raise ApiError("请先输入要问的内容", 400, code="ai_bad_request")
+
+    team_id = access.team.id
+    actor_id, actor_name = access.ctx.actor()
+    mode = str(body.get("mode") or "ask")
+    context = body.get("context")
+    user_id = access.ctx.user.id if access.ctx.user is not None else None
+    # 先把配置与参数校验跑一遍：有问题直接返回 400，不用开流
+    assistant._prepare_turn(
+        session, team=access.team, message=message, messages=messages,
+        session_id=session_id, context=context, user_id=user_id, mode=mode,
+    )
+
+    def sse(event: str, data: dict) -> str:
+        return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    def generate():
+        # 流式读取在新线程里跑，另开一个 session，避免复用请求线程的连接
+        with db_session.session_scope() as fresh:
+            team = fresh.get(Team, team_id)
+            if team is None:
+                yield sse("error", {"message": "团队不存在", "code": "not_found"})
+                return
+            try:
+                for kind, payload in assistant.chat_turn_stream(
+                    fresh, team=team, message=message, messages=messages,
+                    session_id=session_id, context=context, user_id=user_id, mode=mode,
+                ):
+                    yield sse(kind, payload)
+            except ApiError as exc:
+                yield sse("error", {"message": exc.message, "code": exc.code or ""})
+                return
+            except Exception as exc:  # noqa: BLE001 - 流已开始，只能以事件收尾
+                yield sse("error", {"message": f"生成中断：{exc}", "code": "ai_stream_failed"})
+                return
+            activity.log(fresh, team_id, actor_id, actor_name, "asked", "ai", None,
+                         "AI 助手", (message or "")[:180])
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @team_router.get("/ai/sessions")

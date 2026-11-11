@@ -69,6 +69,55 @@ class Team(Base):
     schedules_public: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     issue_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[str] = mapped_column(String(32), nullable=False, default=utcnow_iso)
+    # ---- 客户端（端侧探针）采集策略：由管理员在「权限」页配置
+    # 默认 3 分钟：太长的窗口会让用户以为「AI 没反应」（演示时尤其明显）
+    client_idle_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    client_allow_view: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    client_policy_updated_at: Mapped[str] = mapped_column(String(32), nullable=True)
+
+
+class ClientLog(Base):
+    """端侧上报的「无人操作窗口」日志：一段时间内攒下的文件改动摘要。"""
+
+    __tablename__ = "client_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    team_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
+    )
+    device_id: Mapped[int] = mapped_column(Integer, nullable=True)
+    repo_label: Mapped[str] = mapped_column(String(120), nullable=True, default="")
+    branch: Mapped[str] = mapped_column(String(120), nullable=True, default="")
+    window_start: Mapped[str] = mapped_column(String(32), nullable=True)
+    window_end: Mapped[str] = mapped_column(String(32), nullable=True)
+    idle_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+    file_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    additions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    deletions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    summary: Mapped[str] = mapped_column(Text, nullable=True, default="")
+    # 实时分析结果：优先用模型生成，未配置模型时用规则推断拼装
+    analysis: Mapped[str] = mapped_column(Text, nullable=True, default="")
+    payload: Mapped[str] = mapped_column(Text, nullable=True, default="")
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="received")
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False, default=utcnow_iso)
+
+
+class PairCode(Base):
+    """一次性配对码：给「不是同一个账号」的端侧用，兑换时自动建团队成员。"""
+
+    __tablename__ = "pair_codes"
+    __table_args__ = (Index("uq_pair_codes_hash", "code_hash", unique=True),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    team_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
+    )
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    created_by: Mapped[int] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(32), nullable=False, default=utcnow_iso)
+    expires_at: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    used_at: Mapped[str] = mapped_column(String(32), nullable=True, default="")
+    used_by_user: Mapped[int] = mapped_column(Integer, nullable=True)
 
 
 class TeamMember(Base):
@@ -336,6 +385,7 @@ __all__ = [
     "Issue",
     "Label",
     "Milestone",
+    "PairCode",
     "ScheduleEntry",
     "SessionRow",
     "Setting",

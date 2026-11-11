@@ -248,7 +248,13 @@ def test_split_proposal_apply_and_revert(client, team_slug):
     assert again.status_code == 409
 
 
-def test_apply_rejects_progress_insight(client, team_slug):
+def test_apply_progress_insight_updates_issue(client, team_slug):
+    """进度洞察必须能应用。
+
+    这里曾经断言「进度洞察被 apply 接口拒绝」（400），但前端「预览并应用」按钮
+    调的就是这个接口，而且没有第二条确认路径——结果是议题正文与进度永远写不回去，
+    用户看到的就是「AI 不会改已有议题」。
+    """
     _ingest(client, team_slug, _envelope())
     drain = client.post(f"/api/teams/{team_slug}/engine/jobs/drain", params={"limit": 5})
     assert drain.status_code == 200
@@ -257,11 +263,18 @@ def test_apply_rejects_progress_insight(client, team_slug):
     ).json()["insights"]
     progress = [item for item in drafts if item["kind"] == "progress"]
     assert progress, drafts
+
+    before = client.get(f"/api/teams/{team_slug}/issues/1").json()
     response = client.post(
         f"/api/teams/{team_slug}/engine/insights/{progress[0]['id']}/apply",
         json={"dry_run": False},
     )
-    assert response.status_code == 400
+    assert response.status_code == 200, response.text
+    assert response.json()["applied"] >= 1
+
+    after = client.get(f"/api/teams/{team_slug}/issues/1").json()
+    assert "自动进度" in (after["issue"].get("body") or ""), after["issue"]
+    assert len(after["comments"]) == len(before["comments"]) + 1, after["comments"]
 
 
 def test_split_proposal_merges_duplicates(client, team_slug):

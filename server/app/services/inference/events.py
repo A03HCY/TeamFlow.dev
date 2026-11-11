@@ -48,6 +48,49 @@ SECRET_PATTERNS = (
 
 _MAX_NOTES = 4000
 _MAX_PATH = 400
+_MAX_SYMBOL = 60
+_MAX_SYMBOLS = 12
+_MAX_NOTE = 70
+_MAX_NOTES_PER_FILE = 8
+
+
+def _clean_symbols(value) -> list[str]:
+    """符号名清洗：去空白、限长、去重、限个数。
+
+    符号是本机抽出来的结构摘要（函数/类/文档小节名），不承载代码原文；
+    但仍要防住把整行代码或密钥塞进名字里的情况。
+    """
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if not text or len(text) > _MAX_SYMBOL:
+            continue
+        if any(mark in text for mark in ("\n", "\r", "\x00", "(", ")", ";")):
+            continue
+        if text not in out:
+            out.append(text)
+        if len(out) >= _MAX_SYMBOLS:
+            break
+    return out
+
+
+def _clean_note_list(value, limit: int = _MAX_NOTES_PER_FILE) -> list[str]:
+    """注释线索清洗：允许空格与标点（它们本来就是人话），但压成单行并限长。"""
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        text = " ".join(str(item or "").split())[:_MAX_NOTE]
+        if len(text) < 4:
+            continue
+        if text not in out:
+            out.append(text)
+        if len(out) >= limit:
+            break
+    return out
+
 
 
 class DeviceInfo(BaseModel):
@@ -87,6 +130,13 @@ class FileChange(BaseModel):
     removed: int = 0
     sensitive: bool = False
     lang: str = Field(default="", max_length=24)
+    # 端侧在本地抽出的符号差（新增/移除了哪些函数、类、文档小节）
+    symbols_added: list[str] = Field(default_factory=list)
+    symbols_removed: list[str] = Field(default_factory=list)
+    # 端侧抽出的注释线索（本次新增的单行说明），比路径更能说明「在做什么」
+    notes_added: list[str] = Field(default_factory=list)
+    # 本次新增的内容行：文档是正文，代码是骨架（导入/路由/签名），不含函数体
+    lines_added: list[str] = Field(default_factory=list)
 
     @field_validator("path")
     @classmethod
@@ -103,6 +153,21 @@ class FileChange(BaseModel):
         if ".." in text.split("/"):
             raise ValueError(f"path 不能包含上级目录：{text}")
         return text
+
+    @field_validator("symbols_added", "symbols_removed")
+    @classmethod
+    def _clean_symbol_list(cls, value: list[str]) -> list[str]:
+        return _clean_symbols(value)
+
+    @field_validator("notes_added")
+    @classmethod
+    def _clean_note_list(cls, value: list[str]) -> list[str]:
+        return _clean_note_list(value, limit=4)
+
+    @field_validator("lines_added")
+    @classmethod
+    def _clean_line_list(cls, value: list[str]) -> list[str]:
+        return _clean_note_list(value, limit=8)
 
     @field_validator("status")
     @classmethod
@@ -132,6 +197,38 @@ class EventStats(BaseModel):
     binary: int = 0
 
 
+class ContentDigest(BaseModel):
+    """符号级摘要：本轮新增/移除了哪些函数、类、文档小节。
+
+    不含路径、不含代码原文，因此静默模式（``allow_view=False``）也允许上行。
+    这是「AI 只知道改了几个文件」和「AI 知道改了什么」之间的分界线。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    added: list[str] = Field(default_factory=list)
+    removed: list[str] = Field(default_factory=list)
+    # 本次新增的注释线索：AI 能借此说出「在做什么」，仍然不是代码原文
+    notes: list[str] = Field(default_factory=list)
+    # 本次新增的内容行：没有它，洞察只能说「多了六行」，说不出这六行干了什么
+    lines: list[str] = Field(default_factory=list)
+
+    @field_validator("added", "removed")
+    @classmethod
+    def _clean(cls, value: list[str]) -> list[str]:
+        return _clean_symbols(value)
+
+    @field_validator("notes")
+    @classmethod
+    def _clean_notes(cls, value: list[str]) -> list[str]:
+        return _clean_note_list(value)
+
+    @field_validator("lines")
+    @classmethod
+    def _clean_lines(cls, value: list[str]) -> list[str]:
+        return _clean_note_list(value, limit=10)
+
+
 class CodeEventEnvelope(BaseModel):
     """一次保存触发的端侧事件包。"""
 
@@ -146,6 +243,7 @@ class CodeEventEnvelope(BaseModel):
     repo: RepoInfo
     stats: EventStats = Field(default_factory=EventStats)
     files: list[FileChange] = Field(default_factory=list)
+    digest: ContentDigest = Field(default_factory=ContentDigest)
     redactions: int = 0
     redacted: bool = True
     notes: str = ""
@@ -244,9 +342,18 @@ def parse_envelope(raw: bytes | str | dict | None) -> CodeEventEnvelope:
 
 
 def audit_secrets(envelope: CodeEventEnvelope) -> None:
-    """兜底扫描：文件名与备注里出现密钥样式的内容就拒收。"""
+    """兜底扫描：文件名、备注与符号名里出现密钥样式的内容就拒收。"""
     haystacks = [envelope.notes, envelope.repo.label, envelope.repo.branch]
     haystacks.extend(item.path for item in envelope.files)
+    haystacks.extend(envelope.digest.added)
+    haystacks.extend(envelope.digest.removed)
+    haystacks.extend(envelope.digest.notes)
+    haystacks.extend(envelope.digest.lines)
+    for item in envelope.files:
+        haystacks.extend(item.symbols_added)
+        haystacks.extend(item.symbols_removed)
+        haystacks.extend(item.lines_added)
+        haystacks.extend(item.notes_added)
     for text in haystacks:
         for pattern in SECRET_PATTERNS:
             if pattern.search(text or ""):
@@ -266,6 +373,7 @@ def summary(envelope: CodeEventEnvelope) -> dict:
 
 __all__ = [
     "CodeEventEnvelope",
+    "ContentDigest",
     "EVENT_KINDS",
     "EventStats",
     "FILE_STATUSES",

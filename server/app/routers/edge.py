@@ -517,8 +517,9 @@ async def apply_insight(
     insight = session.get(Insight, int(insight_id))
     if insight is None or insight.team_id != access.id:
         raise ApiError("洞察不存在", 404, code="insight_not_found")
-    if insight.kind == "progress":
-        raise ApiError("进度洞察请在引擎页确认，不通过该接口执行", 400)
+    # 这里曾经直接拒绝 kind == "progress"，但前端「预览并应用」按钮调的正是本接口，
+    # 而项目里也没有第二条确认进度洞察的路径——结果就是进度洞察永远只能驳回，
+    # 议题正文与进度记录永远不会被写回。进度洞察现在也带 actions，走同一条执行器。
     if insight.state != "draft":
         raise ApiError(f"当前状态是 {insight.state}，只有草稿可以执行", 409, code="bad_state")
     try:

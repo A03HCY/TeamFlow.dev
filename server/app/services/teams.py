@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import secrets
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from ..db.base import utcnow_iso
@@ -24,6 +24,31 @@ DEFAULT_LABELS = [
 
 ADMIN_ROLES = {"owner", "admin"}
 EDITABLE_ROLES = {"owner", "admin", "member"}
+
+# 团队被删掉之后，SQLite 会把它的编号重新分配给下一个新建团队（id 是 max+1，不是自增序列）。
+# 只要旧团队的子表数据没清干净，新团队写默认标签时就会撞 (team_id, name) 唯一约束，
+# 表现为「新建团队 → 服务器内部错误」。建团队前先按新编号清一遍残留，代价是一次索引删除。
+_TEAM_SCOPED_TABLES = (
+    "labels", "team_members", "milestones", "schedule_entries", "activity",
+    "ai_sessions", "devices", "repo_bindings", "code_events", "client_logs",
+    "inference_jobs", "inference_audit", "team_engine", "integration_credentials",
+    "issues", "insights", "pair_codes",
+)
+
+
+def _clear_reused_team_id(session: Session, team_id: int) -> None:
+    """清掉「上一个占用这个编号的团队」留下的孤儿行（只可能有孤儿，新团队还没有任何数据）。"""
+    session.execute(
+        text("delete from issue_labels where issue_id in "
+             "(select id from issues where team_id = :t)"), {"t": team_id})
+    session.execute(
+        text("delete from comments where issue_id in "
+             "(select id from issues where team_id = :t)"), {"t": team_id})
+    session.execute(
+        text("delete from insight_events where insight_id in "
+             "(select id from insights where team_id = :t)"), {"t": team_id})
+    for table in _TEAM_SCOPED_TABLES:
+        session.execute(text(f"delete from {table} where team_id = :t"), {"t": team_id})
 
 
 # ------------------------------------------------------------------ 查询
@@ -241,6 +266,7 @@ def create_team(session: Session, name: str, slug: str | None = None,
     )
     session.add(team)
     session.flush()
+    _clear_reused_team_id(session, team.id)
     for label_name, color in DEFAULT_LABELS:
         session.add(Label(team_id=team.id, name=label_name, color=color))
     if owner_id:

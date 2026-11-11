@@ -212,7 +212,7 @@ def test_unpushed_and_no_test_change_do_not_mark_done(client, team_slug):
     assert insight["confidence"] < 0.75
 
 
-def test_docs_only_event_stays_below_threshold(client, team_slug):
+def test_docs_only_event_is_rejected(client, team_slug):
     paired = _pair(client, team_slug)
     envelope = _envelope(
         "evt-docs-0001",
@@ -229,7 +229,11 @@ def test_docs_only_event_stays_below_threshold(client, team_slug):
 
     results = client.post(f"/api/teams/{team_slug}/engine/jobs/drain?limit=5").json()["results"]
     assert results[0]["created"] is False
-    assert "置信度" in results[0]["skipped"]
+    # 拒绝理由来自准入闸门：纯文档改动不再靠「置信度不够」这种数字兜住，
+    # 而是直接说清「不构成功能进展」，并把结论留在 admission 里便于复盘
+    assert "文档" in results[0]["skipped"]
+    assert results[0]["admission"]["verdict"] == "skip"
+    assert results[0]["admission"]["firm"] is True
 
     insights = client.get(f"/api/teams/{team_slug}/engine/insights?state=all").json()["insights"]
     assert insights == []

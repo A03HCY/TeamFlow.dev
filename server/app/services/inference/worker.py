@@ -161,7 +161,14 @@ class InferenceWorker:
                 job.finished_at = utcnow_iso()
                 job.error = ""
                 job.budget = json.dumps(
-                    {"stage": "rules", "events": result.events}, ensure_ascii=False
+                    {
+                        "stage": "rules",
+                        "events": result.events,
+                        # 没有建卡时，这里要能回答「为什么没建」——否则排查只能靠猜
+                        "skipped": result.skipped,
+                        "admission": result.admission,
+                    },
+                    ensure_ascii=False,
                 )
                 return {"ok": True, "job_id": job_id, **result.as_dict()}
         except Exception as exc:  # noqa: BLE001
@@ -279,6 +286,8 @@ def job_dict(job: InferenceJob) -> dict:
         "error": job.error or "",
         "run_id": job.run_id or "",
         "payload": _loads(job.payload, {}),
+        # 准入结论（verdict/reason）藏在 budget 里：没建卡时靠它解释「为什么没建」
+        "budget": _loads(job.budget, {}),
         "created_at": job.created_at,
         "started_at": job.started_at,
         "finished_at": job.finished_at,

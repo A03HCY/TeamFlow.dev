@@ -56,6 +56,58 @@ def _endpoint(base_url: str) -> str:
     return base + "/chat/completions"
 
 
+def probe(cfg: dict, timeout: int = 20) -> dict:
+    """用一次最小的对话请求验证配置是否可用。
+
+    只发一句话、限制 16 个 token，成本可以忽略；返回模型的原话与实际模型名，
+    让用户能确认「地址 + 模型 + Key」三者都对得上。
+    """
+    payload = {
+        "model": cfg["model"],
+        "messages": [
+            {"role": "system", "content": "你是连通性检查助手。"},
+            {"role": "user", "content": "只回复「可用」两个字，不要标点。"},
+        ],
+        "temperature": 0,
+        "max_tokens": 16,
+        "stream": False,
+    }
+    endpoint = _endpoint(cfg["base_url"])
+    if not endpoint.startswith(("http://", "https://")):
+        raise ValueError(
+            "接口地址格式不正确：请填写完整地址，例如 https://api.deepseek.com"
+        )
+    req = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {cfg['api_key']}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            body = json.loads(e.read().decode("utf-8", "replace"))
+            detail = (body.get("error") or {}).get("message", "") if isinstance(body, dict) else ""
+        except Exception:
+            detail = ""
+        raise ValueError(f"AI 服务返回错误（HTTP {e.code}）：{detail or e.reason}") from e
+    except urllib.error.URLError as e:
+        raise ValueError(f"无法连接 AI 服务：{e.reason}") from e
+    except TimeoutError as e:
+        raise ValueError("AI 服务响应超时，请检查接口地址是否可达") from e
+    choices = data.get("choices") or []
+    if not choices:
+        raise ValueError("AI 服务没有返回内容，请确认模型名是否正确")
+    reply = str((choices[0].get("message") or {}).get("content") or "").strip()
+    return {"reply": reply, "model": str(data.get("model") or cfg["model"])}
+
+
 def _validate_images(images) -> list[str]:
     if not isinstance(images, list) or not images:
         raise ValueError("请先选择至少一张图片")

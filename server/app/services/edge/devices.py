@@ -83,6 +83,31 @@ def pair_device(
     return device, token
 
 
+def upsert_device(session: Session, *, team_id: int, name: str = "", platform: str = "",
+                  user_id: int | None = None) -> tuple[Device, str]:
+    """同一台机器重复绑定时复用同一行设备，只换令牌，避免设备列表里堆重复项。"""
+    wanted = (name or "")[:MAX_NAME]
+    row = None
+    if wanted:
+        row = session.execute(
+            select(Device).where(
+                Device.team_id == team_id,
+                Device.user_id == user_id,
+                Device.name == wanted,
+                Device.revoked_at.is_(None),
+            )
+        ).scalars().first()
+    if row is None:
+        return pair_device(session, team_id=team_id, name=name, platform=platform, user_id=user_id)
+    token = new_token()
+    row.token_hash = hash_token(token)
+    if platform:
+        row.platform = platform[:MAX_PLATFORM]
+    row.paired_at = utcnow_iso()
+    session.flush()
+    return row, token
+
+
 def find_by_token(session: Session, token: str | None) -> Device | None:
     """按明文 token 找设备（不判断可用性，调用方要自己看 ``revoked_at``）。"""
     text = (token or "").strip()
@@ -161,6 +186,22 @@ def require_usable(device: Device | None) -> Device:
     return device
 
 
+def seen_within(device: Device, seconds: int = 600) -> bool:
+    """十分钟内有过心跳就算在线。
+
+    端侧除了 WS 也有纯 REST 上报（客户端窗口就是这种），没有长连接，
+    只按「连接是否存在」判断会一直显示离线。这里用心跳时间兜底。
+    """
+    seen = getattr(device, "last_seen_at", "") or ""
+    if not seen:
+        return False
+    try:
+        moment = datetime.strptime(seen, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return False
+    return (datetime.now(timezone.utc) - moment).total_seconds() <= seconds
+
+
 def device_state(device: Device, *, online: bool = False) -> str:
     if device.revoked_at:
         return "revoked"
@@ -200,6 +241,7 @@ __all__ = [
     "list_devices",
     "new_token",
     "pair_device",
+    "upsert_device",
     "require_usable",
     "revoke",
     "touch",

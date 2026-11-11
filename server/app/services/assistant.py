@@ -135,6 +135,76 @@ def _post(cfg: dict, messages: list[dict], *, temperature: float, max_tokens: in
     return str(content)
 
 
+def _open_stream(cfg: dict, messages: list[dict], *, temperature: float, max_tokens: int,
+                 timeout: int = 180):
+    """发起流式请求，返回 HTTP 响应对象（调用方负责逐行读取）。"""
+    payload = {
+        "model": cfg["model"],
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": True,
+    }
+    request = urllib.request.Request(
+        _endpoint(cfg["base_url"]),
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {cfg['api_key']}",
+        },
+        method="POST",
+    )
+    try:
+        return urllib.request.urlopen(request, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = (
+                json.loads(exc.read().decode("utf-8", "replace"))
+                .get("error", {})
+                .get("message", "")
+            )
+        except Exception:  # noqa: BLE001 - 上游错误体不可信
+            detail = ""
+        raise ApiError(
+            f"AI 服务返回错误（HTTP {exc.code}）：{detail or exc.reason}",
+            502,
+            code="ai_upstream",
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise ApiError(f"无法连接 AI 服务：{exc.reason}", 502, code="ai_upstream") from exc
+    except TimeoutError as exc:
+        raise ApiError("AI 服务响应超时，请稍后重试", 504, code="ai_timeout") from exc
+
+
+def _iter_stream(response):
+    """把 SSE 的 ``data:`` 行解析成纯文本增量。"""
+    try:
+        for raw in response:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                obj = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            choices = obj.get("choices") or []
+            if not choices:
+                continue
+            delta = choices[0].get("delta") or {}
+            piece = delta.get("content")
+            if piece:
+                yield str(piece)
+    finally:
+        try:
+            response.close()
+        except Exception:  # noqa: BLE001 - 关闭失败不影响已收到的内容
+            pass
+
+
 # ---------------------------------------------------------------- 上下文
 
 
@@ -450,10 +520,9 @@ def context_block(session: Session, *, team: Team, numbers: list[int]) -> str:
     return "\n".join(lines)
 
 
-def chat_turn(session: Session, *, team: Team, message: str = "", messages=None,
-              session_id: int | None = None, context=None, user_id: int | None = None,
-              mode: str = "ask") -> dict:
-    """一轮对话：可带会话（落库）也可无会话（老接口兼容）。"""
+def _prepare_turn(session: Session, *, team: Team, message: str, messages, session_id,
+                  context, user_id, mode) -> dict:
+    """把「历史 + 本轮提问 + 团队快照」整理成一次请求所需的全部东西。"""
     cfg = check_config(get_config(session))
     mode = mode if mode in MODES else "ask"
     numbers: list[int] = []
@@ -489,29 +558,74 @@ def chat_turn(session: Session, *, team: Team, message: str = "", messages=None,
     if extra:
         parts.append(extra)
 
-    reply = _post(
-        cfg,
-        [{"role": "system", "content": "\n\n".join(parts)}] + cleaned,
-        temperature=0.4,
-        max_tokens=1200,
-    ).strip()
-    if not reply:
-        raise ApiError("AI 没有返回内容，请稍后重试", 502, code="ai_empty")
+    return {
+        "cfg": cfg,
+        "mode": mode,
+        "numbers": numbers,
+        "row": row,
+        "cleaned": cleaned,
+        "payload": [{"role": "system", "content": "\n\n".join(parts)}] + cleaned,
+    }
 
-    result = {"reply": reply, "model": cfg["model"], "session_id": None, "title": "",
-              "context": numbers, "mode": mode}
+
+def _store_turn(session: Session, prep: dict, reply: str) -> dict:
+    """把这一轮问答落库，返回给前端的元信息。"""
+    result = {"reply": reply, "model": prep["cfg"]["model"], "session_id": None, "title": "",
+              "context": prep["numbers"], "mode": prep["mode"]}
+    row = prep["row"]
     if row is not None:
-        _append_message(session, row, "user", cleaned[-1]["content"], numbers)
+        _append_message(session, row, "user", prep["cleaned"][-1]["content"], prep["numbers"])
         _append_message(session, row, "assistant", reply)
         result.update(
             {
                 "session_id": row.id,
                 "title": row.title or "新的对话",
-                "mode": row.mode or mode,
+                "mode": row.mode or prep["mode"],
                 "updated_at": row.updated_at,
             }
         )
     return result
+
+
+def chat_turn(session: Session, *, team: Team, message: str = "", messages=None,
+              session_id: int | None = None, context=None, user_id: int | None = None,
+              mode: str = "ask") -> dict:
+    """一轮对话：可带会话（落库）也可无会话（老接口兼容）。"""
+    prep = _prepare_turn(session, team=team, message=message, messages=messages,
+                         session_id=session_id, context=context, user_id=user_id, mode=mode)
+    reply = _post(
+        prep["cfg"],
+        prep["payload"],
+        temperature=0.4,
+        max_tokens=1200,
+    ).strip()
+    if not reply:
+        raise ApiError("AI 没有返回内容，请稍后重试", 502, code="ai_empty")
+    return _store_turn(session, prep, reply)
+
+
+def chat_turn_stream(session: Session, *, team: Team, message: str = "", messages=None,
+                     session_id: int | None = None, context=None, user_id: int | None = None,
+                     mode: str = "ask"):
+    """流式版一轮对话：先逐段产出 ``("delta", {...})``，最后产出 ``("done", {...})``。
+
+    落库与返回结构与非流式版完全一致，前端拿到 ``done`` 后即完成这一轮。
+    """
+    prep = _prepare_turn(session, team=team, message=message, messages=messages,
+                         session_id=session_id, context=context, user_id=user_id, mode=mode)
+
+    def gen():
+        response = _open_stream(prep["cfg"], prep["payload"], temperature=0.4, max_tokens=1200)
+        pieces: list[str] = []
+        for piece in _iter_stream(response):
+            pieces.append(piece)
+            yield ("delta", {"text": piece})
+        reply = "".join(pieces).strip()
+        if not reply:
+            raise ApiError("AI 没有返回内容，请稍后重试", 502, code="ai_empty")
+        yield ("done", _store_turn(session, prep, reply))
+
+    return gen()
 
 
 # ---------------------------------------------------------------- 项目组草稿
